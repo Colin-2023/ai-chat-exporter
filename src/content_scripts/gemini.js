@@ -1,7 +1,7 @@
 /**
  * Gemini Chat Exporter - Gemini content script
  * Exports Gemini chat conversations to Markdown with LaTeX preservation
- * Version 4.0.0 - DOM-based extraction (no clipboard dependency)
+ * Version 4.1.0 - DOM-based extraction, localized UI
  */
 
 (function() {
@@ -14,7 +14,9 @@
     SELECT_DROPDOWN_ID: 'gemini-select-dropdown',
     CHECKBOX_CLASS: 'gemini-export-checkbox',
     EXPORT_MODE_NAME: 'gemini-export-mode',
-    
+    CONFIRM_BTN_ID: 'gemini-export-confirm',
+    CANCEL_BTN_ID: 'gemini-export-cancel',
+
     SELECTORS: {
       CHAT_CONTAINER: '[data-test-id="chat-history-container"]',
       CONVERSATION_TURN: 'div.conversation-container',
@@ -24,15 +26,15 @@
       MODEL_RESPONSE_CONTENT: 'message-content .markdown',
       CONVERSATION_TITLE: '[data-test-id="conversation-title"]'
     },
-    
+
     TIMING: {
       SCROLL_DELAY: 2000,
-      POPUP_DURATION: 900,
+      POPUP_DURATION: 2500,
       NOTIFICATION_CLEANUP_DELAY: 1000,
       MAX_SCROLL_ATTEMPTS: 60,
       MAX_STABLE_SCROLLS: 4
     },
-    
+
     STYLES: {
       BUTTON_PRIMARY: '#1a73e8',
       BUTTON_HOVER: '#1765c1',
@@ -43,19 +45,18 @@
       LIGHT_TEXT: '#222',
       LIGHT_BORDER: '#ccc'
     },
-    
+
     MATH_BLOCK_SELECTOR: '.math-block[data-math]',
     MATH_INLINE_SELECTOR: '.math-inline[data-math]',
-    
-    DEFAULT_FILENAME: 'gemini_chat_export',
-    MARKDOWN_HEADER: '# Gemini Chat Export',
-    EXPORT_TIMESTAMP_FORMAT: 'Exported on:'
+
+    FILENAME_PREFIX: 'Gemini',
+    EXPORT_TIMESTAMP_LABEL: '导出时间：'
   };
 
   // ============================================================================
   // UTILITY SERVICES
   // ============================================================================
-  
+
   class DateUtils {
     static getDateString() {
       const d = new Date();
@@ -94,9 +95,44 @@
       return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
     }
 
+    // Single updatable progress notification
+    static _progressEl = null;
+
+    static showProgress(message) {
+      if (this._progressEl && document.body.contains(this._progressEl)) {
+        this._progressEl.textContent = message;
+        return;
+      }
+      const el = document.createElement('div');
+      Object.assign(el.style, {
+        position: 'fixed',
+        top: '24px',
+        right: '24px',
+        zIndex: '99999',
+        background: '#1a73e8',
+        color: '#fff',
+        padding: '10px 18px',
+        borderRadius: '8px',
+        fontSize: '1em',
+        boxShadow: '0 2px 12px rgba(0,0,0,0.15)',
+        opacity: '0.95',
+        pointerEvents: 'none'
+      });
+      el.textContent = message;
+      document.body.appendChild(el);
+      this._progressEl = el;
+    }
+
+    static hideProgress() {
+      if (this._progressEl) {
+        this._progressEl.remove();
+        this._progressEl = null;
+      }
+    }
+
     static createNotification(message) {
-      const popup = document.createElement('div');
-      Object.assign(popup.style, {
+      const el = document.createElement('div');
+      Object.assign(el.style, {
         position: 'fixed',
         top: '24px',
         right: '24px',
@@ -110,17 +146,17 @@
         opacity: '0.95',
         pointerEvents: 'none'
       });
-      popup.textContent = message;
-      document.body.appendChild(popup);
-      setTimeout(() => popup.remove(), CONFIG.TIMING.POPUP_DURATION);
-      return popup;
+      el.textContent = message;
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), CONFIG.TIMING.POPUP_DURATION);
+      return el;
     }
   }
 
   // ============================================================================
   // FILENAME SERVICE
   // ============================================================================
-  
+
   class FilenameService {
     static getConversationTitle() {
       const titleCard = document.querySelector(CONFIG.SELECTORS.CONVERSATION_TITLE);
@@ -128,75 +164,79 @@
     }
 
     static generate(customFilename, conversationTitle) {
-      // Priority: custom > conversation title > page title > timestamp
+      const prefix = CONFIG.FILENAME_PREFIX;
+      const dateStr = DateUtils.getDateString();
+
       if (customFilename && customFilename.trim()) {
         const base = this._sanitizeCustomFilename(customFilename);
-        return base || `${CONFIG.DEFAULT_FILENAME}_${DateUtils.getDateString()}`;
+        return base ? `${prefix}_${base}_${dateStr}` : `${prefix}_${dateStr}`;
       }
 
-      // Try conversation title first
       if (conversationTitle) {
         const safeTitle = StringUtils.sanitizeFilename(conversationTitle);
-        if (safeTitle) return `${safeTitle}_${DateUtils.getDateString()}`;
+        if (safeTitle) return `${prefix}_${safeTitle}_${dateStr}`;
       }
 
-      // Fallback to page title
       const pageTitle = document.querySelector('title')?.textContent.trim();
       if (pageTitle) {
         const safeTitle = StringUtils.sanitizeFilename(pageTitle);
-        if (safeTitle) return `${safeTitle}_${DateUtils.getDateString()}`;
+        if (safeTitle) return `${prefix}_${safeTitle}_${dateStr}`;
       }
 
-      // Final fallback
-      return `${CONFIG.DEFAULT_FILENAME}_${DateUtils.getDateString()}`;
+      return `${prefix}_${dateStr}`;
     }
 
     static _sanitizeCustomFilename(filename) {
-      let base = filename.trim().replace(/\.[^/.]+$/, '');
-      return base.replace(/[^a-zA-Z0-9_\-]/g, '_');
+      const base = filename.trim().replace(/\.[^/.]+$/, '');
+      // Allow ASCII alphanumeric, dash, underscore, and CJK characters
+      return base.replace(/[^a-zA-Z0-9_\-\u4e00-\u9fff\u3040-\u30ff]/g, '_');
     }
   }
 
   // ============================================================================
   // SCROLL SERVICE
   // ============================================================================
-  
+
   class ScrollService {
     static async loadAllMessages() {
       const scrollContainer = document.querySelector(CONFIG.SELECTORS.CHAT_CONTAINER);
       if (!scrollContainer) {
-        throw new Error('Could not find chat history container. Are you on a Gemini chat page?');
+        throw new Error('未找到对话容器，请确认当前页面为 Gemini 对话页面。');
       }
 
       let stableScrolls = 0;
       let scrollAttempts = 0;
       let lastScrollTop = null;
 
-      while (stableScrolls < CONFIG.TIMING.MAX_STABLE_SCROLLS && 
+      while (stableScrolls < CONFIG.TIMING.MAX_STABLE_SCROLLS &&
              scrollAttempts < CONFIG.TIMING.MAX_SCROLL_ATTEMPTS) {
         const currentTurnCount = document.querySelectorAll(CONFIG.SELECTORS.CONVERSATION_TURN).length;
+        DOMUtils.showProgress(`正在加载历史消息… 第 ${scrollAttempts + 1} 次，已找到 ${currentTurnCount} 轮对话`);
+
         scrollContainer.scrollTop = 0;
         await DOMUtils.sleep(CONFIG.TIMING.SCROLL_DELAY);
-        
+
         const scrollTop = scrollContainer.scrollTop;
         const newTurnCount = document.querySelectorAll(CONFIG.SELECTORS.CONVERSATION_TURN).length;
-        
+
         if (newTurnCount === currentTurnCount && (lastScrollTop === scrollTop || scrollTop === 0)) {
           stableScrolls++;
         } else {
           stableScrolls = 0;
         }
-        
+
         lastScrollTop = scrollTop;
         scrollAttempts++;
       }
+
+      DOMUtils.hideProgress();
     }
   }
 
   // ============================================================================
   // FILE EXPORT SERVICE
   // ============================================================================
-  
+
   class FileExportService {
     static downloadMarkdown(markdown, filenameBase) {
       const blob = new Blob([markdown], { type: 'text/markdown' });
@@ -214,14 +254,14 @@
 
     static async exportToClipboard(markdown) {
       await navigator.clipboard.writeText(markdown);
-      alert('Conversation copied to clipboard!');
+      DOMUtils.createNotification('✓ 已复制到剪贴板！');
     }
   }
 
   // ============================================================================
   // MARKDOWN CONVERTER SERVICE
   // ============================================================================
-  
+
   class MarkdownConverter {
     constructor() {
       this.turndownService = this._createTurndownService();
@@ -296,22 +336,39 @@
 
     extractUserQuery(userQueryElement) {
       if (!userQueryElement) return '';
-      
+
+      const parts = [];
+
+      // Detect image / file attachments and insert placeholder
+      const attachmentImgs = userQueryElement.querySelectorAll(
+        'img:not([aria-hidden="true"]):not([role="presentation"])'
+      );
+      const attachmentChips = userQueryElement.querySelectorAll(
+        '[data-test-id*="file"], [class*="attachment"], [class*="file-chip"], [class*="image-chip"]'
+      );
+      const attachCount = attachmentImgs.length + attachmentChips.length;
+      if (attachCount > 0) {
+        parts.push(`[📎 图片/文件附件 ×${attachCount}]`);
+      }
+
       const queryLines = userQueryElement.querySelectorAll(CONFIG.SELECTORS.USER_QUERY_TEXT);
       if (queryLines.length === 0) {
         const queryText = userQueryElement.querySelector('.query-text, .user-query-container');
-        return queryText ? queryText.textContent.trim() : '';
+        if (queryText) parts.push(queryText.textContent.trim());
+      } else {
+        const text = Array.from(queryLines)
+          .map(line => line.textContent.trim())
+          .filter(t => t.length > 0)
+          .join('\n');
+        if (text) parts.push(text);
       }
-      
-      return Array.from(queryLines)
-        .map(line => line.textContent.trim())
-        .filter(text => text.length > 0)
-        .join('\n');
+
+      return parts.join('\n\n');
     }
 
     extractModelResponse(modelResponseElement) {
       if (!modelResponseElement) return '';
-      
+
       const markdownContainer = modelResponseElement.querySelector(CONFIG.SELECTORS.MODEL_RESPONSE_CONTENT);
       if (!markdownContainer) return '';
 
@@ -321,8 +378,7 @@
       } else {
         result = FallbackConverter.convertToMarkdown(markdownContainer);
       }
-      
-      // Remove Gemini citation markers
+
       return StringUtils.removeCitations(result);
     }
   }
@@ -330,7 +386,7 @@
   // ============================================================================
   // FALLBACK CONVERTER (when Turndown unavailable)
   // ============================================================================
-  
+
   class FallbackConverter {
     static convertToMarkdown(container) {
       return Array.from(container.childNodes).map(node => this._blockText(node)).join('');
@@ -339,13 +395,11 @@
     static _inlineText(node) {
       if (!node) return '';
       if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
-
       if (node.nodeType !== Node.ELEMENT_NODE) return '';
 
       const el = node;
       if (el.matches?.(CONFIG.MATH_INLINE_SELECTOR)) {
-        const latex = el.getAttribute('data-math') || '';
-        return `$${latex}$`;
+        return `$${el.getAttribute('data-math') || ''}$`;
       }
 
       const tag = el.tagName.toLowerCase();
@@ -356,27 +410,20 @@
       if (tag === 'i' || tag === 'em') {
         return `*${Array.from(el.childNodes).map(n => this._inlineText(n)).join('')}*`;
       }
-      if (tag === 'code') {
-        return `\`${el.textContent || ''}\``;
-      }
+      if (tag === 'code') return `\`${el.textContent || ''}\``;
 
       return Array.from(el.childNodes).map(n => this._inlineText(n)).join('');
     }
 
     static _blockText(el) {
       if (!el) return '';
-
-      if (el.nodeType === Node.TEXT_NODE) {
-        return (el.textContent || '').trim();
-      }
-
+      if (el.nodeType === Node.TEXT_NODE) return (el.textContent || '').trim();
       if (el.nodeType !== Node.ELEMENT_NODE) return '';
 
       const tag = el.tagName.toLowerCase();
 
       if (el.matches?.(CONFIG.MATH_BLOCK_SELECTOR)) {
-        const latex = el.getAttribute('data-math') || '';
-        return `$$${latex}$$\n\n`;
+        return `$$${el.getAttribute('data-math') || ''}$$\n\n`;
       }
 
       const handlers = {
@@ -386,20 +433,21 @@
         h4: () => `#### ${this._inlineText(el)}\n\n`,
         h5: () => `##### ${this._inlineText(el)}\n\n`,
         h6: () => `###### ${this._inlineText(el)}\n\n`,
-        p: () => `${this._inlineText(el)}\n\n`,
+        p:  () => `${this._inlineText(el)}\n\n`,
         hr: () => `---\n\n`,
         blockquote: () => this._convertBlockquote(el),
-        pre: () => `\`\`\`\n${el.textContent || ''}\n\`\`\`\n\n`,
+        pre: () => {
+          const codeEl = el.querySelector('code');
+          const lang = codeEl?.className?.match(/language-(\S+)/)?.[1] || '';
+          return `\`\`\`${lang}\n${el.textContent || ''}\n\`\`\`\n\n`;
+        },
         ul: () => this._convertList(el, false),
         ol: () => this._convertList(el, true),
         table: () => this._convertTable(el)
       };
 
-      if (handlers[tag]) {
-        return handlers[tag]();
-      }
+      if (handlers[tag]) return handlers[tag]();
 
-      // Default: process child nodes
       return Array.from(el.childNodes).map(n => this._blockText(n)).join('');
     }
 
@@ -420,14 +468,14 @@
     static _convertTable(el) {
       const rows = Array.from(el.querySelectorAll('tr'));
       if (!rows.length) return '';
-      
+
       const getCells = row => Array.from(row.querySelectorAll('th,td'))
         .map(cell => this._inlineText(cell).replace(/\n/g, ' ').trim());
-      
+
       const header = getCells(rows[0]);
       const separator = header.map(() => '---');
       const body = rows.slice(1).map(getCells);
-      
+
       const lines = [
         `| ${header.join(' | ')} |`,
         `| ${separator.join(' | ')} |`,
@@ -440,14 +488,15 @@
   // ============================================================================
   // CHECKBOX MANAGER
   // ============================================================================
+
   class CheckboxManager {
     createCheckbox(type, container) {
       const cb = document.createElement('input');
       cb.type = 'checkbox';
       cb.className = CONFIG.CHECKBOX_CLASS;
       cb.checked = true;
-      cb.title = `Include this ${type} message in export`;
-      
+      cb.title = `将此${type}消息包含在导出中`;
+
       Object.assign(cb.style, {
         position: 'absolute',
         right: '28px',
@@ -455,7 +504,7 @@
         zIndex: '10000',
         transform: 'scale(1.2)'
       });
-      
+
       container.style.position = 'relative';
       container.appendChild(cb);
       return cb;
@@ -463,15 +512,13 @@
 
     injectCheckboxes() {
       const turns = document.querySelectorAll(CONFIG.SELECTORS.CONVERSATION_TURN);
-      
+
       turns.forEach(turn => {
-        // User query checkbox
         const userQueryElem = turn.querySelector(CONFIG.SELECTORS.USER_QUERY);
         if (userQueryElem && !userQueryElem.querySelector(`.${CONFIG.CHECKBOX_CLASS}`)) {
-          this.createCheckbox('user', userQueryElem);
+          this.createCheckbox('用户', userQueryElem);
         }
-        
-        // Model response checkbox
+
         const modelRespElem = turn.querySelector(CONFIG.SELECTORS.MODEL_RESPONSE);
         if (modelRespElem && !modelRespElem.querySelector(`.${CONFIG.CHECKBOX_CLASS}`)) {
           this.createCheckbox('Gemini', modelRespElem);
@@ -492,6 +539,7 @@
   // ============================================================================
   // SELECTION MANAGER
   // ============================================================================
+
   class SelectionManager {
     constructor(checkboxManager) {
       this.checkboxManager = checkboxManager;
@@ -500,8 +548,8 @@
 
     applySelection(value) {
       const checkboxes = document.querySelectorAll(`.${CONFIG.CHECKBOX_CLASS}`);
-      
-      switch(value) {
+
+      switch (value) {
         case 'all':
           checkboxes.forEach(cb => cb.checked = true);
           break;
@@ -515,7 +563,7 @@
           checkboxes.forEach(cb => cb.checked = false);
           break;
       }
-      
+
       this.lastSelection = value;
     }
 
@@ -525,6 +573,7 @@
       if (select) select.value = 'all';
     }
 
+    // Re-apply the current selection to any newly-loaded messages
     reapplyIfNeeded() {
       const select = document.getElementById(CONFIG.SELECT_DROPDOWN_ID);
       if (select && this.lastSelection !== 'custom') {
@@ -537,49 +586,57 @@
   // ============================================================================
   // UI BUILDER
   // ============================================================================
+
   class UIBuilder {
     static getInputStyles(isDark) {
-      return isDark 
-        ? `background:${CONFIG.STYLES.DARK_BG};color:${CONFIG.STYLES.DARK_TEXT};border:1px solid ${CONFIG.STYLES.DARK_BORDER};`
-        : `background:${CONFIG.STYLES.LIGHT_BG};color:${CONFIG.STYLES.LIGHT_TEXT};border:1px solid ${CONFIG.STYLES.LIGHT_BORDER};`;
+      return isDark
+        ? `background:${CONFIG.STYLES.DARK_BG};color:${CONFIG.STYLES.DARK_TEXT};border:1px solid ${CONFIG.STYLES.DARK_BORDER};border-radius:4px;`
+        : `background:${CONFIG.STYLES.LIGHT_BG};color:${CONFIG.STYLES.LIGHT_TEXT};border:1px solid ${CONFIG.STYLES.LIGHT_BORDER};border-radius:4px;`;
     }
 
-    static createDropdownHTML() {
-      const isDark = DOMUtils.isDarkMode();
+    static createDropdownHTML(isDark) {
       const inputStyles = this.getInputStyles(isDark);
-      
+      const confirmStyle = `padding:7px 20px;background:${CONFIG.STYLES.BUTTON_PRIMARY};color:#fff;border:none;border-radius:5px;font-size:0.95em;font-weight:bold;cursor:pointer;`;
+      const cancelStyle  = `padding:7px 14px;background:transparent;color:${isDark ? '#aaa' : '#666'};border:1px solid ${isDark ? '#555' : '#ccc'};border-radius:5px;font-size:0.95em;cursor:pointer;`;
+
       return `
-        <div style="margin-top:10px;">
-          <label style="margin-right:10px;">
+        <div style="font-weight:bold;font-size:1.05em;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid ${isDark ? '#333' : '#eee'};">
+          导出设置
+        </div>
+        <div style="margin-bottom:10px;">
+          <label style="margin-right:14px;cursor:pointer;">
             <input type="radio" name="${CONFIG.EXPORT_MODE_NAME}" value="file" checked>
-            Export as file
+            导出为文件
           </label>
-          <label>
+          <label style="cursor:pointer;">
             <input type="radio" name="${CONFIG.EXPORT_MODE_NAME}" value="clipboard">
-            Export to clipboard
+            复制到剪贴板
           </label>
         </div>
-        <div id="gemini-filename-row" style="margin-top:10px;display:block;">
-          <label for="${CONFIG.FILENAME_INPUT_ID}" style="font-weight:bold;">
-            Filename <span style='color:#888;font-weight:normal;'>(optional)</span>:
-          </label>
-          <input id="${CONFIG.FILENAME_INPUT_ID}" type="text" 
-                 style="margin-left:8px;padding:2px 8px;width:260px;${inputStyles}" 
-                 value="">
-          <span style="display:block;font-size:0.95em;color:#888;margin-top:2px;">
-            Optional. Leave blank to use chat title or timestamp. 
-            Only <b>.md</b> (Markdown) files are supported. Do not include an extension.
-          </span>
+        <div id="gemini-filename-row" style="margin-bottom:10px;">
+          <div style="font-weight:bold;margin-bottom:4px;">
+            文件名 <span style="color:#888;font-weight:normal;">（可选）</span>
+          </div>
+          <input id="${CONFIG.FILENAME_INPUT_ID}" type="text"
+                 style="padding:4px 10px;width:100%;box-sizing:border-box;${inputStyles}"
+                 placeholder="留空将使用对话标题">
+          <div style="font-size:0.84em;color:#888;margin-top:3px;">
+            格式：Gemini_文件名_日期.md &nbsp;·&nbsp; 请勿含扩展名
+          </div>
         </div>
-        <div style="margin-top:14px;">
-          <label style="font-weight:bold;">Select messages:</label>
-          <select id="${CONFIG.SELECT_DROPDOWN_ID}" 
-                  style="margin-left:8px;padding:2px 8px;${inputStyles}">
-            <option value="all">All</option>
-            <option value="ai">Only answers</option>
-            <option value="none">None</option>
-            <option value="custom">Custom</option>
+        <div style="margin-bottom:14px;">
+          <span style="font-weight:bold;margin-right:8px;">选择消息：</span>
+          <select id="${CONFIG.SELECT_DROPDOWN_ID}"
+                  style="padding:3px 8px;${inputStyles}">
+            <option value="all">全部</option>
+            <option value="ai">仅 AI 回复</option>
+            <option value="none">不选</option>
+            <option value="custom">自定义</option>
           </select>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:8px;border-top:1px solid ${isDark ? '#333' : '#eee'};">
+          <button id="${CONFIG.CANCEL_BTN_ID}" style="${cancelStyle}">取消</button>
+          <button id="${CONFIG.CONFIRM_BTN_ID}" style="${confirmStyle}">开始导出</button>
         </div>
       `;
     }
@@ -587,179 +644,60 @@
     static createButton() {
       const btn = document.createElement('button');
       btn.id = CONFIG.BUTTON_ID;
-      btn.textContent = 'Export Chat';
-      
+      btn.textContent = '导出对话';
+
       Object.assign(btn.style, {
         position: 'fixed',
-        top: '80px',
+        bottom: '100px',
         right: '20px',
         zIndex: '9999',
-        padding: '8px 16px',
+        padding: '8px 18px',
         background: CONFIG.STYLES.BUTTON_PRIMARY,
         color: '#fff',
         border: 'none',
         borderRadius: '6px',
-        fontSize: '1em',
-        boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+        fontSize: '0.95em',
+        boxShadow: '0 2px 10px rgba(0,0,0,0.18)',
         cursor: 'pointer',
         fontWeight: 'bold',
         transition: 'background 0.2s'
       });
-      
+
       btn.addEventListener('mouseenter', () => btn.style.background = CONFIG.STYLES.BUTTON_HOVER);
       btn.addEventListener('mouseleave', () => btn.style.background = CONFIG.STYLES.BUTTON_PRIMARY);
-      
+
       return btn;
     }
 
     static createDropdown() {
+      const isDark = DOMUtils.isDarkMode();
       const dropdown = document.createElement('div');
       dropdown.id = CONFIG.DROPDOWN_ID;
-      
-      const isDark = DOMUtils.isDarkMode();
+
       Object.assign(dropdown.style, {
         position: 'fixed',
-        top: '124px',
+        bottom: '148px',
         right: '20px',
         zIndex: '9999',
-        border: '1px solid #ccc',
-        borderRadius: '6px',
-        padding: '10px',
-        boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+        border: `1px solid ${isDark ? CONFIG.STYLES.DARK_BORDER : CONFIG.STYLES.LIGHT_BORDER}`,
+        borderRadius: '8px',
+        padding: '14px 16px',
+        boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
         display: 'none',
         background: isDark ? '#222' : '#fff',
-        color: isDark ? '#fff' : '#222'
+        color: isDark ? '#fff' : '#222',
+        width: '320px'
       });
-      
-      dropdown.innerHTML = this.createDropdownHTML();
+
+      dropdown.innerHTML = this.createDropdownHTML(isDark);
       return dropdown;
-    }
-  }
-
-  function tableToMarkdown(table, service) {
-    const rows = Array.from(table.querySelectorAll('tr'));
-    if (!rows.length) return '';
-
-    const toCells = row => Array.from(row.querySelectorAll('th,td'))
-      .map(cell => service.turndown(cell.innerHTML).replace(/\n+/g, ' ').trim());
-
-    const header = toCells(rows[0]);
-    const separator = header.map(() => '---');
-    const body = rows.slice(1).map(toCells);
-
-    const lines = [
-      `| ${header.join(' | ')} |`,
-      `| ${separator.join(' | ')} |`,
-      ...body.map(r => `| ${r.join(' | ')} |`)
-    ];
-
-    return `${lines.join('\n')}\n\n`;
-  }
-
-  function inlineText(node) {
-    if (!node) return '';
-    if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
-
-    if (node.nodeType !== Node.ELEMENT_NODE) return '';
-
-    const el = node;
-    if (el.matches(CONFIG.MATH_INLINE_SELECTOR)) {
-      const latex = el.getAttribute('data-math') || '';
-      return `$${latex}$`;
-    }
-
-    const tag = el.tagName.toLowerCase();
-    if (tag === 'br') return '\n';
-    if (tag === 'b' || tag === 'strong') {
-      return `**${Array.from(el.childNodes).map(inlineText).join('')}**`;
-    }
-    if (tag === 'i' || tag === 'em') {
-      return `*${Array.from(el.childNodes).map(inlineText).join('')}*`;
-    }
-    if (tag === 'code') {
-      return `\`${el.textContent || ''}\``;
-    }
-
-    return Array.from(el.childNodes).map(inlineText).join('');
-  }
-
-  function blockText(el) {
-    if (!el) return '';
-
-    if (el.nodeType === Node.TEXT_NODE) {
-      return (el.textContent || '').trim();
-    }
-
-    if (el.nodeType !== Node.ELEMENT_NODE) return '';
-
-    const tag = el.tagName.toLowerCase();
-
-    if (el.matches(CONFIG.MATH_BLOCK_SELECTOR)) {
-      const latex = el.getAttribute('data-math') || '';
-      return `$$${latex}$$\n\n`;
-    }
-
-    switch (tag) {
-      case 'h1': return `# ${inlineText(el)}\n\n`;
-      case 'h2': return `## ${inlineText(el)}\n\n`;
-      case 'h3': return `### ${inlineText(el)}\n\n`;
-      case 'h4': return `#### ${inlineText(el)}\n\n`;
-      case 'h5': return `##### ${inlineText(el)}\n\n`;
-      case 'h6': return `###### ${inlineText(el)}\n\n`;
-      case 'p': return `${inlineText(el)}\n\n`;
-      case 'hr': return `---\n\n`;
-      case 'blockquote': {
-        const lines = Array.from(el.childNodes).map(blockText).join('').trim().split('\n');
-        return lines.map(line => line ? `> ${line}` : '>').join('\n') + '\n\n';
-      }
-      case 'pre': {
-        const code = el.textContent || '';
-        return `\
-\
-\
-${code}\n\
-\
-\n`;
-      }
-      case 'ul': {
-        const items = Array.from(el.querySelectorAll(':scope > li'))
-          .map(li => `- ${inlineText(li).trim()}`)
-          .join('\n');
-        return `${items}\n\n`;
-      }
-      case 'ol': {
-        const items = Array.from(el.querySelectorAll(':scope > li'))
-          .map((li, i) => `${i + 1}. ${inlineText(li).trim()}`)
-          .join('\n');
-        return `${items}\n\n`;
-      }
-      case 'table': {
-        const rows = Array.from(el.querySelectorAll('tr'));
-        if (!rows.length) return '';
-        const cells = row => Array.from(row.querySelectorAll('th,td'))
-          .map(cell => inlineText(cell).replace(/\n/g, ' ').trim());
-        const header = cells(rows[0]);
-        const sep = header.map(() => '---');
-        const body = rows.slice(1).map(r => cells(r));
-        const lines = [
-          `| ${header.join(' | ')} |`,
-          `| ${sep.join(' | ')} |`,
-          ...body.map(r => `| ${r.join(' | ')} |`)
-        ];
-        return `${lines.join('\n')}\n\n`;
-      }
-      case 'div':
-      case 'section':
-      case 'article':
-      default: {
-        return Array.from(el.childNodes).map(blockText).join('');
-      }
     }
   }
 
   // ============================================================================
   // EXPORT SERVICE
   // ============================================================================
+
   class ExportService {
     constructor(checkboxManager) {
       this.checkboxManager = checkboxManager;
@@ -767,9 +705,9 @@ ${code}\n\
     }
 
     _buildMarkdownHeader(conversationTitle) {
-      const title = conversationTitle || CONFIG.MARKDOWN_HEADER;
+      const title = conversationTitle || 'Gemini 对话导出';
       const timestamp = DateUtils.getLocaleString();
-      return `# ${title}\n\n> ${CONFIG.EXPORT_TIMESTAMP_FORMAT} ${timestamp}\n\n---\n\n`;
+      return `# ${title}\n\n> ${CONFIG.EXPORT_TIMESTAMP_LABEL}${timestamp}\n\n---\n\n`;
     }
 
     async buildMarkdown(turns, conversationTitle) {
@@ -777,7 +715,9 @@ ${code}\n\
 
       for (let i = 0; i < turns.length; i++) {
         const turn = turns[i];
-        DOMUtils.createNotification(`Processing message ${i + 1} of ${turns.length}...`);
+        DOMUtils.showProgress(`正在处理第 ${i + 1} / ${turns.length} 轮对话…`);
+
+        let turnContent = '';
 
         // User message
         const userQueryElem = turn.querySelector(CONFIG.SELECTORS.USER_QUERY);
@@ -786,61 +726,67 @@ ${code}\n\
           if (cb?.checked) {
             const userQuery = this.markdownConverter.extractUserQuery(userQueryElem);
             if (userQuery) {
-              markdown += `## 👤 You\n\n${userQuery}\n\n`;
+              turnContent += `## 👤 User\n\n${userQuery}\n\n`;
             }
           }
         }
 
-        // Model response (DOM-based extraction)
+        // Model response
         const modelRespElem = turn.querySelector(CONFIG.SELECTORS.MODEL_RESPONSE);
         if (modelRespElem) {
           const cb = modelRespElem.querySelector(`.${CONFIG.CHECKBOX_CLASS}`);
           if (cb?.checked) {
             const modelResponse = this.markdownConverter.extractModelResponse(modelRespElem);
             if (modelResponse) {
-              markdown += `## 🤖 Gemini\n\n${modelResponse}\n\n`;
+              turnContent += `## 🤖 Gemini\n\n${modelResponse}\n\n`;
             } else {
-              markdown += `## 🤖 Gemini\n\n[Note: Could not extract model response from message ${i + 1}.]\n\n`;
+              turnContent += `## 🤖 Gemini\n\n*[无法提取第 ${i + 1} 轮的模型回复]*\n\n`;
             }
           }
         }
 
-        markdown += '---\n\n';
+        // Only add separator when there is actual exported content in this turn
+        if (turnContent) {
+          markdown += turnContent + '---\n\n';
+        }
       }
 
+      DOMUtils.hideProgress();
       return markdown;
     }
 
-    async execute(exportMode, customFilename) {
+    async execute(exportMode, customFilename, selectionManager) {
       try {
-        // Load all messages
         await ScrollService.loadAllMessages();
 
-        // Get all turns and inject checkboxes
         const turns = Array.from(document.querySelectorAll(CONFIG.SELECTORS.CONVERSATION_TURN));
         this.checkboxManager.injectCheckboxes();
 
-        // Check if any messages selected
+        // Reapply selection preset to any messages loaded during scroll
+        if (selectionManager) {
+          selectionManager.reapplyIfNeeded();
+        }
+
         if (!this.checkboxManager.hasAnyChecked()) {
-          alert('Please select at least one message to export using the checkboxes or the dropdown.');
+          alert('请至少勾选一条消息后再导出。');
           return;
         }
 
-        // Get title and build markdown
         const conversationTitle = FilenameService.getConversationTitle();
         const markdown = await this.buildMarkdown(turns, conversationTitle);
 
-        // Export based on mode
         if (exportMode === 'clipboard') {
           await FileExportService.exportToClipboard(markdown);
         } else {
           const filename = FilenameService.generate(customFilename, conversationTitle);
           FileExportService.downloadMarkdown(markdown, filename);
+          DOMUtils.createNotification('✓ 文件已下载！');
         }
 
       } catch (error) {
+        DOMUtils.hideProgress();
         console.error('Export error:', error);
-        alert(`Export failed: ${error.message}`);
+        alert(`导出失败：${error.message}`);
       }
     }
   }
@@ -848,6 +794,7 @@ ${code}\n\
   // ============================================================================
   // EXPORT CONTROLLER
   // ============================================================================
+
   class ExportController {
     constructor() {
       this.checkboxManager = new CheckboxManager();
@@ -866,16 +813,16 @@ ${code}\n\
     createUI() {
       this.button = UIBuilder.createButton();
       this.dropdown = UIBuilder.createDropdown();
-      
+
       document.body.appendChild(this.dropdown);
       document.body.appendChild(this.button);
-      
-      this.setupFilenameRowToggle();
+
+      this._setupFilenameRowToggle();
     }
 
-    setupFilenameRowToggle() {
-      const updateFilenameRow = () => {
-        const fileRow = this.dropdown.querySelector('#gemini-filename-row');
+    _setupFilenameRowToggle() {
+      const update = () => {
+        const fileRow  = this.dropdown.querySelector('#gemini-filename-row');
         const fileRadio = this.dropdown.querySelector(`input[name="${CONFIG.EXPORT_MODE_NAME}"][value="file"]`);
         if (fileRow && fileRadio) {
           fileRow.style.display = fileRadio.checked ? 'block' : 'none';
@@ -883,21 +830,29 @@ ${code}\n\
       };
 
       this.dropdown.querySelectorAll(`input[name="${CONFIG.EXPORT_MODE_NAME}"]`)
-        .forEach(radio => radio.addEventListener('change', updateFilenameRow));
-      
-      updateFilenameRow();
+        .forEach(radio => radio.addEventListener('change', update));
+
+      update();
     }
 
     attachEventListeners() {
-      // Button click
-      this.button.addEventListener('click', () => this.handleButtonClick());
+      // Main button: toggle dropdown open/close
+      this.button.addEventListener('click', () => this.toggleDropdown());
 
-      // Selection dropdown
-      const selectDropdown = this.dropdown.querySelector(`#${CONFIG.SELECT_DROPDOWN_ID}`);
-      selectDropdown.addEventListener('change', (e) => this.handleSelectionChange(e.target.value));
+      // Selection dropdown changes
+      this.dropdown.querySelector(`#${CONFIG.SELECT_DROPDOWN_ID}`)
+        .addEventListener('change', e => this._handleSelectionChange(e.target.value));
 
-      // Checkbox manual changes
-      document.addEventListener('change', (e) => {
+      // "开始导出" confirm button
+      this.dropdown.querySelector(`#${CONFIG.CONFIRM_BTN_ID}`)
+        .addEventListener('click', () => this.startExport());
+
+      // "取消" cancel button
+      this.dropdown.querySelector(`#${CONFIG.CANCEL_BTN_ID}`)
+        .addEventListener('click', () => this.cancelExport());
+
+      // Manual checkbox change → switch to custom mode
+      document.addEventListener('change', e => {
         if (e.target?.classList?.contains(CONFIG.CHECKBOX_CLASS)) {
           const select = document.getElementById(CONFIG.SELECT_DROPDOWN_ID);
           if (select && select.value !== 'custom') {
@@ -907,56 +862,66 @@ ${code}\n\
         }
       });
 
-      // Click outside to hide dropdown
-      document.addEventListener('mousedown', (e) => {
-        if (this.dropdown.style.display !== 'none' && 
-            !this.dropdown.contains(e.target) && 
+      // Click outside dropdown → cancel (close + remove checkboxes)
+      document.addEventListener('mousedown', e => {
+        if (this.dropdown.style.display !== 'none' &&
+            !this.dropdown.contains(e.target) &&
             e.target !== this.button) {
-          this.dropdown.style.display = 'none';
+          this.cancelExport();
         }
       });
     }
 
-    handleSelectionChange(value) {
+    toggleDropdown() {
+      if (this.dropdown.style.display === 'none') {
+        // Refresh theme colours each open
+        const isDark = DOMUtils.isDarkMode();
+        this.dropdown.style.background = isDark ? '#222' : '#fff';
+        this.dropdown.style.color      = isDark ? '#fff' : '#222';
+        this.dropdown.style.borderColor = isDark ? CONFIG.STYLES.DARK_BORDER : CONFIG.STYLES.LIGHT_BORDER;
+
+        this.dropdown.style.display = '';
+
+        // Inject checkboxes so the user can preview and adjust selection
+        this.checkboxManager.injectCheckboxes();
+        this.selectionManager.reapplyIfNeeded();
+      } else {
+        this.cancelExport();
+      }
+    }
+
+    _handleSelectionChange(value) {
       this.checkboxManager.injectCheckboxes();
       this.selectionManager.applySelection(value);
     }
 
-    async handleButtonClick() {
-      this.checkboxManager.injectCheckboxes();
-      
-      if (this.dropdown.style.display === 'none') {
-        this.dropdown.style.display = '';
-        return;
-      }
+    cancelExport() {
+      this.dropdown.style.display = 'none';
+      this.checkboxManager.removeAll();
+      // Do not reset selection – user may want to keep it for the next export
+    }
 
+    async startExport() {
+      const exportMode = this.dropdown.querySelector(`input[name="${CONFIG.EXPORT_MODE_NAME}"]:checked`)?.value || 'file';
+      const customFilename = exportMode === 'file'
+        ? (this.dropdown.querySelector(`#${CONFIG.FILENAME_INPUT_ID}`)?.value.trim() || '')
+        : '';
+
+      this.dropdown.style.display = 'none';
       this.button.disabled = true;
-      this.button.textContent = 'Exporting...';
+      this.button.textContent = '导出中…';
 
       try {
-        const exportMode = this.dropdown.querySelector(`input[name="${CONFIG.EXPORT_MODE_NAME}"]:checked`)?.value || 'file';
-        const customFilename = exportMode === 'file' 
-          ? this.dropdown.querySelector(`#${CONFIG.FILENAME_INPUT_ID}`)?.value.trim() || ''
-          : '';
-
-        this.dropdown.style.display = 'none';
-        
-        await this.exportService.execute(exportMode, customFilename);
-
-        // Cleanup after export
+        await this.exportService.execute(exportMode, customFilename, this.selectionManager);
+      } finally {
         this.checkboxManager.removeAll();
         this.selectionManager.reset();
-        
-        if (exportMode === 'file') {
-          const filenameInput = this.dropdown.querySelector(`#${CONFIG.FILENAME_INPUT_ID}`);
-          if (filenameInput) filenameInput.value = '';
-        }
 
-      } catch (error) {
-        console.error('Export error:', error);
-      } finally {
+        const filenameInput = this.dropdown.querySelector(`#${CONFIG.FILENAME_INPUT_ID}`);
+        if (filenameInput) filenameInput.value = '';
+
         this.button.disabled = false;
-        this.button.textContent = 'Export Chat';
+        this.button.textContent = '导出对话';
       }
     }
 
@@ -964,7 +929,7 @@ ${code}\n\
       const updateVisibility = () => {
         try {
           if (chrome?.storage?.sync) {
-            chrome.storage.sync.get(['hideExportBtn'], (result) => {
+            chrome.storage.sync.get(['hideExportBtn'], result => {
               this.button.style.display = result.hideExportBtn ? 'none' : '';
             });
           }
@@ -975,9 +940,7 @@ ${code}\n\
 
       updateVisibility();
 
-      const observer = new MutationObserver(updateVisibility);
-      observer.observe(document.body, { childList: true, subtree: true });
-
+      // Listen only to storage events – no MutationObserver on the full DOM
       if (chrome?.storage?.onChanged) {
         chrome.storage.onChanged.addListener((changes, area) => {
           if (area === 'sync' && 'hideExportBtn' in changes) {
@@ -989,9 +952,19 @@ ${code}\n\
   }
 
   // ============================================================================
-  // INITIALIZATION
+  // INITIALIZATION + SPA NAVIGATION DETECTION
   // ============================================================================
+
   const controller = new ExportController();
   controller.init();
+
+  // Gemini is a SPA: re-initialize if the button disappears after navigation
+  setInterval(() => {
+    if (!document.getElementById(CONFIG.BUTTON_ID) &&
+        document.querySelector(CONFIG.SELECTORS.CHAT_CONTAINER)) {
+      const freshController = new ExportController();
+      freshController.init();
+    }
+  }, 2000);
 
 })();

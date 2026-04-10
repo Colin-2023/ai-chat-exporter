@@ -5,21 +5,19 @@
   - Checkbox to hide/show export button on chat pages
   - Simple, accessible layout
 -->
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <title>AI Chat Exporter</title>
   <style>
-    body { font-family: sans-serif; margin: 16px; }
-    label { display: flex; align-items: center; gap: 8px; }
-    button { margin-top: 12px; }
+    body { font-family: sans-serif; margin: 16px; min-width: 180px; }
+    label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
   </style>
 </head>
 <body>
-  <!-- Checkbox to hide/show export button -->
   <label>
     <input type="checkbox" id="hideExportBtn">
-    Hide export button
+    隐藏导出按钮
   </label>
   <script src="popup.js"></script>
 </body>

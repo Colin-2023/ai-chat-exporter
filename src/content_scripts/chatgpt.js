@@ -1,8 +1,8 @@
 
 /**
  * ChatGPT Chat Exporter - Content script
- * Adds an export UI, lets users pick which messages to include,
- * and downloads/copies perfectly formatted Markdown.
+ * Exports ChatGPT conversations to Markdown with message selection.
+ * Version 4.1.0 - Localized UI, improved reliability
  */
 
 (function() {
@@ -11,6 +11,7 @@
   // ============================================================================
   // CONSTANTS
   // ============================================================================
+
   const CONFIG = {
     BUTTON_ID: 'chatgpt-export-btn',
     DROPDOWN_ID: 'chatgpt-export-dropdown',
@@ -18,6 +19,8 @@
     SELECT_DROPDOWN_ID: 'chatgpt-select-dropdown',
     CHECKBOX_CLASS: 'chatgpt-export-checkbox',
     EXPORT_MODE_NAME: 'chatgpt-export-mode',
+    CONFIRM_BTN_ID: 'chatgpt-export-confirm',
+    CANCEL_BTN_ID: 'chatgpt-export-cancel',
 
     SELECTORS: {
       CONVERSATION_TURN: 'article[data-testid^="conversation-turn-"]',
@@ -43,7 +46,8 @@
       CLIPBOARD_CLEAR_DELAY: 150,
       CLIPBOARD_READ_DELAY: 300,
       MAX_CLIPBOARD_ATTEMPTS: 10,
-      POPUP_DURATION: 1000
+      FOCUS_WAIT_TIMEOUT: 15000,
+      POPUP_DURATION: 2500
     },
 
     STYLES: {
@@ -55,12 +59,15 @@
       LIGHT_BG: '#fff',
       LIGHT_TEXT: '#222',
       LIGHT_BORDER: '#ccc'
-    }
+    },
+
+    FILENAME_PREFIX: 'ChatGPT'
   };
 
   // ============================================================================
   // UTILITIES
   // ============================================================================
+
   const Utils = {
     sleep(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
@@ -83,9 +90,43 @@
       return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
     },
 
+    // Single updatable progress notification
+    _progressEl: null,
+
+    showProgress(message) {
+      if (this._progressEl && document.body.contains(this._progressEl)) {
+        this._progressEl.textContent = message;
+        return;
+      }
+      const el = document.createElement('div');
+      Object.assign(el.style, {
+        position: 'fixed',
+        top: '24px',
+        right: '24px',
+        zIndex: '99999',
+        background: '#1a73e8',
+        color: '#fff',
+        padding: '10px 18px',
+        borderRadius: '8px',
+        fontSize: '1em',
+        boxShadow: '0 2px 12px rgba(0,0,0,0.15)',
+        pointerEvents: 'none'
+      });
+      el.textContent = message;
+      document.body.appendChild(el);
+      this._progressEl = el;
+    },
+
+    hideProgress() {
+      if (this._progressEl) {
+        this._progressEl.remove();
+        this._progressEl = null;
+      }
+    },
+
     createNotification(message) {
-      const popup = document.createElement('div');
-      Object.assign(popup.style, {
+      const el = document.createElement('div');
+      Object.assign(el.style, {
         position: 'fixed',
         top: '24px',
         right: '24px',
@@ -98,23 +139,58 @@
         boxShadow: '0 2px 12px rgba(0,0,0,0.12)',
         pointerEvents: 'none'
       });
-      popup.textContent = message;
-      document.body.appendChild(popup);
-      setTimeout(() => popup.remove(), CONFIG.TIMING.POPUP_DURATION);
-      return popup;
+      el.textContent = message;
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), CONFIG.TIMING.POPUP_DURATION);
+      return el;
+    },
+
+    // Simple HTML → Markdown for user messages
+    htmlToMarkdown(el) {
+      if (!el) return '';
+      const walk = node => {
+        if (!node) return '';
+        if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
+        if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+        const tag = node.tagName.toLowerCase();
+        const children = () => Array.from(node.childNodes).map(walk).join('');
+
+        switch (tag) {
+          case 'br':     return '\n';
+          case 'p':      return children() + '\n\n';
+          case 'strong':
+          case 'b':      return `**${children()}**`;
+          case 'em':
+          case 'i':      return `*${children()}*`;
+          case 'code':   return `\`${node.textContent}\``;
+          case 'pre':    return `\`\`\`\n${node.textContent}\n\`\`\`\n\n`;
+          case 'ul': {
+            const items = Array.from(node.querySelectorAll(':scope > li'));
+            return items.map(li => `- ${walk(li).trim()}`).join('\n') + '\n\n';
+          }
+          case 'ol': {
+            const items = Array.from(node.querySelectorAll(':scope > li'));
+            return items.map((li, i) => `${i + 1}. ${walk(li).trim()}`).join('\n') + '\n\n';
+          }
+          default:       return children();
+        }
+      };
+      return walk(el).trim();
     }
   };
 
   // ============================================================================
   // CHECKBOX MANAGER
   // ============================================================================
+
   class CheckboxManager {
     create(turn, type, topOffset) {
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
       checkbox.className = `${CONFIG.CHECKBOX_CLASS} ${type}`;
       checkbox.checked = true;
-      checkbox.title = `Include this ${type === 'user' ? 'user' : 'ChatGPT'} message`;
+      checkbox.title = `将此${type === 'user' ? '用户' : 'ChatGPT'}消息包含在导出中`;
 
       Object.assign(checkbox.style, {
         position: 'absolute',
@@ -160,6 +236,7 @@
   // ============================================================================
   // SELECTION MANAGER
   // ============================================================================
+
   class SelectionManager {
     constructor() {
       this.lastSelection = 'all';
@@ -181,11 +258,17 @@
       this.lastSelection = value;
     }
 
-    resetDropdown() {
+    reapplyIfNeeded() {
       const dropdown = document.getElementById(CONFIG.SELECT_DROPDOWN_ID);
-      if (dropdown) {
-        dropdown.value = 'all';
+      if (dropdown && this.lastSelection !== 'custom') {
+        dropdown.value = this.lastSelection;
+        this.apply(this.lastSelection);
       }
+    }
+
+    reset() {
+      const dropdown = document.getElementById(CONFIG.SELECT_DROPDOWN_ID);
+      if (dropdown) dropdown.value = 'all';
       this.lastSelection = 'all';
     }
   }
@@ -193,33 +276,33 @@
   // ============================================================================
   // UI BUILDER
   // ============================================================================
+
   class UIBuilder {
-    static getInputStyles() {
-      const isDark = Utils.isDarkMode();
+    static getInputStyles(isDark) {
       return isDark
-        ? `background:${CONFIG.STYLES.DARK_BG};color:${CONFIG.STYLES.DARK_TEXT};border:1px solid ${CONFIG.STYLES.DARK_BORDER};`
-        : `background:${CONFIG.STYLES.LIGHT_BG};color:${CONFIG.STYLES.LIGHT_TEXT};border:1px solid ${CONFIG.STYLES.LIGHT_BORDER};`;
+        ? `background:${CONFIG.STYLES.DARK_BG};color:${CONFIG.STYLES.DARK_TEXT};border:1px solid ${CONFIG.STYLES.DARK_BORDER};border-radius:4px;`
+        : `background:${CONFIG.STYLES.LIGHT_BG};color:${CONFIG.STYLES.LIGHT_TEXT};border:1px solid ${CONFIG.STYLES.LIGHT_BORDER};border-radius:4px;`;
     }
 
     static createButton() {
       const button = document.createElement('button');
       button.id = CONFIG.BUTTON_ID;
-      button.textContent = 'Export Chat';
+      button.textContent = '导出对话';
 
       Object.assign(button.style, {
         position: 'fixed',
-        top: '80px',
+        bottom: '100px',
         right: '20px',
         zIndex: '9999',
-        padding: '8px 16px',
+        padding: '8px 18px',
         background: CONFIG.STYLES.BUTTON_PRIMARY,
         color: '#fff',
         border: 'none',
         borderRadius: '6px',
-        fontSize: '1em',
+        fontSize: '0.95em',
         fontWeight: 'bold',
         cursor: 'pointer',
-        boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+        boxShadow: '0 2px 10px rgba(0,0,0,0.18)',
         transition: 'background 0.2s'
       });
 
@@ -229,55 +312,66 @@
       return button;
     }
 
-    static createDropdown() {
+    static createDropdown(isDark) {
       const dropdown = document.createElement('div');
       dropdown.id = CONFIG.DROPDOWN_ID;
 
       Object.assign(dropdown.style, {
         position: 'fixed',
-        top: '124px',
+        bottom: '148px',
         right: '20px',
         zIndex: '9999',
-        border: '1px solid #ccc',
-        borderRadius: '6px',
-        padding: '10px',
-        boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+        border: `1px solid ${isDark ? CONFIG.STYLES.DARK_BORDER : CONFIG.STYLES.LIGHT_BORDER}`,
+        borderRadius: '8px',
+        padding: '14px 16px',
+        boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
         display: 'none',
-        background: Utils.isDarkMode() ? '#222' : '#fff',
-        color: Utils.isDarkMode() ? '#fff' : '#222'
+        background: isDark ? '#222' : '#fff',
+        color: isDark ? '#fff' : '#222',
+        width: '320px'
       });
 
-      const inputStyles = this.getInputStyles();
+      const inputStyles = this.getInputStyles(isDark);
+      const confirmStyle = `padding:7px 20px;background:${CONFIG.STYLES.BUTTON_PRIMARY};color:#fff;border:none;border-radius:5px;font-size:0.95em;font-weight:bold;cursor:pointer;`;
+      const cancelStyle  = `padding:7px 14px;background:transparent;color:${isDark ? '#aaa' : '#666'};border:1px solid ${isDark ? '#555' : '#ccc'};border-radius:5px;font-size:0.95em;cursor:pointer;`;
 
       dropdown.innerHTML = `
-        <div style="margin-top:10px;">
-          <label style="margin-right:10px;">
+        <div style="font-weight:bold;font-size:1.05em;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid ${isDark ? '#333' : '#eee'};">
+          导出设置
+        </div>
+        <div style="margin-bottom:10px;">
+          <label style="margin-right:14px;cursor:pointer;">
             <input type="radio" name="${CONFIG.EXPORT_MODE_NAME}" value="file" checked>
-            Export as file
+            导出为文件
           </label>
-          <label>
+          <label style="cursor:pointer;">
             <input type="radio" name="${CONFIG.EXPORT_MODE_NAME}" value="clipboard">
-            Export to clipboard
+            复制到剪贴板
           </label>
         </div>
-        <div id="chatgpt-filename-row" style="margin-top:10px;display:block;">
-          <label for="${CONFIG.FILENAME_INPUT_ID}" style="font-weight:bold;">
-            Filename <span style="color:#888;font-weight:normal;">(optional)</span>:
-          </label>
+        <div id="chatgpt-filename-row" style="margin-bottom:10px;">
+          <div style="font-weight:bold;margin-bottom:4px;">
+            文件名 <span style="color:#888;font-weight:normal;">（可选）</span>
+          </div>
           <input id="${CONFIG.FILENAME_INPUT_ID}" type="text" value=""
-                 style="margin-left:8px;padding:2px 8px;width:260px;${inputStyles}">
-          <span style="display:block;font-size:0.93em;color:#888;margin-top:2px;">
-            Leave blank to use chat title or a timestamp. Do not include an extension.
-          </span>
+                 style="padding:4px 10px;width:100%;box-sizing:border-box;${inputStyles}"
+                 placeholder="留空将使用对话标题">
+          <div style="font-size:0.84em;color:#888;margin-top:3px;">
+            格式：ChatGPT_文件名_日期.md &nbsp;·&nbsp; 请勿含扩展名
+          </div>
         </div>
-        <div style="margin-top:14px;">
-          <label style="font-weight:bold;">Select messages:</label>
-          <select id="${CONFIG.SELECT_DROPDOWN_ID}" style="margin-left:8px;padding:2px 8px;${inputStyles}">
-            <option value="all">All</option>
-            <option value="ai">Only answers</option>
-            <option value="none">None</option>
-            <option value="custom">Custom</option>
+        <div style="margin-bottom:14px;">
+          <span style="font-weight:bold;margin-right:8px;">选择消息：</span>
+          <select id="${CONFIG.SELECT_DROPDOWN_ID}" style="padding:3px 8px;${inputStyles}">
+            <option value="all">全部</option>
+            <option value="ai">仅 AI 回复</option>
+            <option value="none">不选</option>
+            <option value="custom">自定义</option>
           </select>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:8px;border-top:1px solid ${isDark ? '#333' : '#eee'};">
+          <button id="${CONFIG.CANCEL_BTN_ID}" style="${cancelStyle}">取消</button>
+          <button id="${CONFIG.CONFIRM_BTN_ID}" style="${confirmStyle}">开始导出</button>
         </div>
       `;
 
@@ -288,6 +382,7 @@
   // ============================================================================
   // EXPORT SERVICE
   // ============================================================================
+
   class ExportService {
     constructor(checkboxManager) {
       this.checkboxManager = checkboxManager;
@@ -301,8 +396,8 @@
 
       const firstTurn = document.querySelector(CONFIG.SELECTORS.CONVERSATION_TURN);
       if (firstTurn) {
-        const overflowAncestor = firstTurn.closest('div.overflow-y-auto, div.flex-1, main');
-        if (overflowAncestor) return overflowAncestor;
+        const ancestor = firstTurn.closest('div.overflow-y-auto, div.flex-1, main');
+        if (ancestor) return ancestor;
         return firstTurn.parentElement;
       }
 
@@ -312,7 +407,7 @@
     async scrollToLoadAll() {
       const container = this.getChatContainer();
       if (!container) {
-        throw new Error('Could not find chat history container. Are you on a ChatGPT page?');
+        throw new Error('未找到对话容器，请确认当前页面为 ChatGPT 对话页面。');
       }
 
       let stableScrolls = 0;
@@ -321,6 +416,8 @@
 
       while (stableScrolls < CONFIG.TIMING.MAX_STABLE_SCROLLS && attempts < CONFIG.TIMING.MAX_SCROLL_ATTEMPTS) {
         const currentTurnCount = document.querySelectorAll(CONFIG.SELECTORS.CONVERSATION_TURN).length;
+        Utils.showProgress(`正在加载历史消息… 第 ${attempts + 1} 次，已找到 ${currentTurnCount} 轮对话`);
+
         container.scrollTop = 0;
         await Utils.sleep(CONFIG.TIMING.SCROLL_DELAY);
 
@@ -336,23 +433,51 @@
         lastScrollTop = currentTop;
         attempts++;
       }
+
+      Utils.hideProgress();
+    }
+
+    async _waitForFocus(timeout) {
+      if (document.hasFocus()) return true;
+      return new Promise(resolve => {
+        const onFocus = () => {
+          clearTimeout(timer);
+          window.removeEventListener('focus', onFocus);
+          resolve(true);
+        };
+        const timer = setTimeout(() => {
+          window.removeEventListener('focus', onFocus);
+          resolve(false);
+        }, timeout);
+        window.addEventListener('focus', onFocus);
+      });
     }
 
     async copyModelResponse(copyButton) {
-      try {
-        await navigator.clipboard.writeText('');
-      } catch (e) {
-        // Ignore clipboard clear errors
-      }
+      // Clear clipboard before starting
+      try { await navigator.clipboard.writeText(''); } catch (e) {}
 
       let attempts = 0;
       while (attempts < CONFIG.TIMING.MAX_CLIPBOARD_ATTEMPTS) {
+        // Ensure page has focus before clipboard interaction
+        if (!document.hasFocus()) {
+          Utils.createNotification('⚠️ 请切回此页面以继续导出…');
+          const focused = await this._waitForFocus(CONFIG.TIMING.FOCUS_WAIT_TIMEOUT);
+          if (!focused) return '';
+        }
+
         copyButton.click();
         await Utils.sleep(CONFIG.TIMING.CLIPBOARD_READ_DELAY);
-        const text = await navigator.clipboard.readText();
-        if (text) {
-          return text;
+
+        try {
+          const text = await navigator.clipboard.readText();
+          if (text) return text;
+        } catch (e) {
+          // Clipboard read failed (page may have lost focus)
         }
+
+        // Clear before next retry so stale data is never returned
+        try { await navigator.clipboard.writeText(''); } catch (e) {}
         attempts++;
         await Utils.sleep(CONFIG.TIMING.CLIPBOARD_CLEAR_DELAY);
       }
@@ -367,73 +492,76 @@
     }
 
     generateFilename(custom, title) {
-      const baseTimestamp = Utils.getDateString();
+      const prefix    = CONFIG.FILENAME_PREFIX;
+      const timestamp = Utils.getDateString();
 
       if (custom?.trim()) {
         let base = custom.trim().replace(/\.[^/.]+$/, '');
-        base = base.replace(/[^a-zA-Z0-9_\-]/g, '_');
-        return base || `chatgpt_chat_export_${baseTimestamp}`;
+        base = base.replace(/[^a-zA-Z0-9_\-\u4e00-\u9fff\u3040-\u30ff]/g, '_');
+        return base ? `${prefix}_${base}_${timestamp}` : `${prefix}_${timestamp}`;
       }
 
       if (title) {
         const safe = Utils.sanitizeFilename(title);
-        if (safe) return `${safe}_${baseTimestamp}`;
+        if (safe) return `${prefix}_${safe}_${timestamp}`;
       }
 
-      return `chatgpt_chat_export_${baseTimestamp}`;
+      return `${prefix}_${timestamp}`;
     }
 
     async buildMarkdown(turns, title) {
       let markdown = title
         ? `# ${title}\n\n`
-        : '# ChatGPT Chat Export\n\n';
-      markdown += `> Exported on: ${new Date().toLocaleString()}\n\n---\n\n`;
+        : '# ChatGPT 对话导出\n\n';
+      markdown += `> 导出时间：${new Date().toLocaleString()}\n\n---\n\n`;
 
       for (let i = 0; i < turns.length; i++) {
         const turn = turns[i];
-        Utils.createNotification(`Processing message ${i + 1} of ${turns.length}...`);
+        Utils.showProgress(`正在处理第 ${i + 1} / ${turns.length} 轮对话…`);
 
-        // User content comes after the sr-only heading element
-        const userHeading = turn.querySelector(CONFIG.SELECTORS.USER_HEADING);
+        let turnContent = '';
+
+        // User message
+        const userHeading  = turn.querySelector(CONFIG.SELECTORS.USER_HEADING);
         const userCheckbox = turn.querySelector(`.${CONFIG.CHECKBOX_CLASS}.user`);
         if (userHeading && userCheckbox?.checked) {
-          const userContent = userHeading.nextElementSibling?.textContent?.trim();
-          markdown += userContent
-            ? `## 👤 You\n\n${userContent}\n\n`
-            : `## 👤 You\n\n[Could not read your message for turn ${i + 1}.]\n\n`;
+          const contentEl = userHeading.nextElementSibling;
+          const userContent = contentEl ? Utils.htmlToMarkdown(contentEl) : '';
+          turnContent += userContent
+            ? `## 👤 User\n\n${userContent}\n\n`
+            : `## 👤 User\n\n*[无法读取第 ${i + 1} 轮的用户消息]*\n\n`;
         }
 
-        const modelHeading = turn.querySelector(CONFIG.SELECTORS.MODEL_HEADING);
+        // Model response
+        const modelHeading  = turn.querySelector(CONFIG.SELECTORS.MODEL_HEADING);
         const modelCheckbox = turn.querySelector(`.${CONFIG.CHECKBOX_CLASS}.model`);
         if (modelHeading && modelCheckbox?.checked) {
           const copyBtn = turn.querySelector(CONFIG.SELECTORS.COPY_BUTTON);
           if (copyBtn) {
             const clipboardText = await this.copyModelResponse(copyBtn);
-            markdown += clipboardText
+            turnContent += clipboardText
               ? `## 🤖 ChatGPT\n\n${clipboardText}\n\n`
-              : `## 🤖 ChatGPT\n\n[Could not copy the response for turn ${i + 1}.]\n\n`;
+              : `## 🤖 ChatGPT\n\n*[无法获取第 ${i + 1} 轮的回复内容]*\n\n`;
           } else {
-            markdown += `## 🤖 ChatGPT\n\n[Copy button not available for turn ${i + 1}.]\n\n`;
+            turnContent += `## 🤖 ChatGPT\n\n*[第 ${i + 1} 轮复制按钮不可用]*\n\n`;
           }
         }
 
-        markdown += '---\n\n';
+        // Only add separator when there is actual exported content in this turn
+        if (turnContent) {
+          markdown += turnContent + '---\n\n';
+        }
       }
 
+      Utils.hideProgress();
       return markdown;
     }
 
-    async export(markdown, mode, filenameBase) {
-      if (mode === 'clipboard') {
-        await navigator.clipboard.writeText(markdown);
-        alert('Conversation copied to clipboard!');
-        return;
-      }
-
-      const blob = new Blob([markdown], { type: 'text/markdown' });
-      const url = URL.createObjectURL(blob);
+    async exportFile(markdown, filenameBase) {
+      const blob   = new Blob([markdown], { type: 'text/markdown' });
+      const url    = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
-      anchor.href = url;
+      anchor.href     = url;
       anchor.download = `${filenameBase}.md`;
       document.body.appendChild(anchor);
       anchor.click();
@@ -443,57 +571,97 @@
       }, 1000);
     }
 
-    async execute(mode, customFilename) {
+    async execute(mode, customFilename, selectionManager) {
       await this.scrollToLoadAll();
+
       this.checkboxManager.injectCheckboxes();
 
+      // Reapply selection preset to any messages loaded during scroll
+      if (selectionManager) selectionManager.reapplyIfNeeded();
+
       if (!this.checkboxManager.anyChecked()) {
-        alert('Please select at least one message to export.');
+        alert('请至少勾选一条消息后再导出。');
         return;
       }
 
-      const turns = Array.from(document.querySelectorAll(CONFIG.SELECTORS.CONVERSATION_TURN));
-      const title = this.getConversationTitle();
+      const turns    = Array.from(document.querySelectorAll(CONFIG.SELECTORS.CONVERSATION_TURN));
+      const title    = this.getConversationTitle();
       const markdown = await this.buildMarkdown(turns, title);
-      const filenameBase = this.generateFilename(customFilename, title);
 
-      await this.export(markdown, mode, filenameBase);
+      if (mode === 'clipboard') {
+        await navigator.clipboard.writeText(markdown);
+        Utils.createNotification('✓ 已复制到剪贴板！');
+      } else {
+        const filenameBase = this.generateFilename(customFilename, title);
+        await this.exportFile(markdown, filenameBase);
+        Utils.createNotification('✓ 文件已下载！');
+      }
     }
   }
 
   // ============================================================================
   // CONTROLLER
   // ============================================================================
+
   class ExportController {
     constructor() {
-      this.checkboxManager = new CheckboxManager();
+      this.checkboxManager  = new CheckboxManager();
       this.selectionManager = new SelectionManager();
-      this.exportService = new ExportService(this.checkboxManager);
-      this.button = null;
+      this.exportService    = new ExportService(this.checkboxManager);
+      this.button   = null;
       this.dropdown = null;
     }
 
     init() {
-      this.button = UIBuilder.createButton();
-      this.dropdown = UIBuilder.createDropdown();
+      const isDark   = Utils.isDarkMode();
+      this.button   = UIBuilder.createButton();
+      this.dropdown = UIBuilder.createDropdown(isDark);
+
       document.body.appendChild(this.button);
       document.body.appendChild(this.dropdown);
-      this.bindEvents();
-      this.observeVisibility();
-      this.toggleFilenameRow();
+
+      this._setupFilenameRowToggle();
+      this._bindEvents();
+      this._observeVisibility();
     }
 
-    bindEvents() {
-      this.button.addEventListener('click', () => this.handleButtonClick());
+    _setupFilenameRowToggle() {
+      const update = () => {
+        const filenameRow = this.dropdown.querySelector('#chatgpt-filename-row');
+        const fileRadio   = this.dropdown.querySelector(`input[name="${CONFIG.EXPORT_MODE_NAME}"][value="file"]`);
+        if (filenameRow && fileRadio) {
+          filenameRow.style.display = fileRadio.checked ? 'block' : 'none';
+        }
+      };
 
+      this.dropdown.querySelectorAll(`input[name="${CONFIG.EXPORT_MODE_NAME}"]`)
+        .forEach(radio => radio.addEventListener('change', update));
+
+      update();
+    }
+
+    _bindEvents() {
+      // Main button: toggle dropdown
+      this.button.addEventListener('click', () => this.toggleDropdown());
+
+      // Selection dropdown changes
       this.dropdown.querySelector(`#${CONFIG.SELECT_DROPDOWN_ID}`)
-        .addEventListener('change', (event) => {
+        .addEventListener('change', event => {
           const value = event.target.value;
           this.checkboxManager.injectCheckboxes();
           this.selectionManager.apply(value);
         });
 
-      document.addEventListener('change', (event) => {
+      // "开始导出" confirm button
+      this.dropdown.querySelector(`#${CONFIG.CONFIRM_BTN_ID}`)
+        .addEventListener('click', () => this.startExport());
+
+      // "取消" cancel button
+      this.dropdown.querySelector(`#${CONFIG.CANCEL_BTN_ID}`)
+        .addEventListener('click', () => this.cancelExport());
+
+      // Manual checkbox change → switch to custom mode
+      document.addEventListener('change', event => {
         if (event.target?.classList?.contains(CONFIG.CHECKBOX_CLASS)) {
           const dropdown = document.getElementById(CONFIG.SELECT_DROPDOWN_ID);
           if (dropdown && dropdown.value !== 'custom') {
@@ -503,67 +671,69 @@
         }
       });
 
-      document.addEventListener('mousedown', (event) => {
+      // Click outside → cancel (close + remove checkboxes)
+      document.addEventListener('mousedown', event => {
         if (this.dropdown.style.display !== 'none' &&
             !this.dropdown.contains(event.target) &&
             event.target !== this.button) {
-          this.dropdown.style.display = 'none';
+          this.cancelExport();
         }
       });
     }
 
-    toggleFilenameRow() {
-      const radios = this.dropdown.querySelectorAll(`input[name="${CONFIG.EXPORT_MODE_NAME}"]`);
-      const filenameRow = this.dropdown.querySelector('#chatgpt-filename-row');
+    toggleDropdown() {
+      if (this.dropdown.style.display === 'none') {
+        // Refresh theme colours each open
+        const isDark = Utils.isDarkMode();
+        this.dropdown.style.background  = isDark ? '#222' : '#fff';
+        this.dropdown.style.color       = isDark ? '#fff' : '#222';
+        this.dropdown.style.borderColor = isDark ? CONFIG.STYLES.DARK_BORDER : CONFIG.STYLES.LIGHT_BORDER;
 
-      const update = () => {
-        const fileRadio = this.dropdown.querySelector(`input[name="${CONFIG.EXPORT_MODE_NAME}"][value="file"]`);
-        if (filenameRow && fileRadio) {
-          filenameRow.style.display = fileRadio.checked ? 'block' : 'none';
-        }
-      };
+        this.dropdown.style.display = '';
 
-      radios.forEach(radio => radio.addEventListener('change', update));
-      update();
+        // Inject checkboxes so user can preview and adjust selection
+        this.checkboxManager.injectCheckboxes();
+        this.selectionManager.reapplyIfNeeded();
+      } else {
+        this.cancelExport();
+      }
     }
 
-    async handleButtonClick() {
-      this.checkboxManager.injectCheckboxes();
-
-      if (this.dropdown.style.display === 'none') {
-        this.dropdown.style.display = '';
-        return;
-      }
-
-      this.button.disabled = true;
-      this.button.textContent = 'Exporting...';
+    cancelExport() {
       this.dropdown.style.display = 'none';
+      this.checkboxManager.removeAll();
+      // Preserve selection setting for next use
+    }
+
+    async startExport() {
+      const mode = this.dropdown.querySelector(`input[name="${CONFIG.EXPORT_MODE_NAME}"]:checked`)?.value || 'file';
+      const filenameInput = this.dropdown.querySelector(`#${CONFIG.FILENAME_INPUT_ID}`);
+      const customFilename = mode === 'file' ? filenameInput?.value?.trim() || '' : '';
+
+      this.dropdown.style.display = 'none';
+      this.button.disabled    = true;
+      this.button.textContent = '导出中…';
 
       try {
-        const mode = this.dropdown.querySelector(`input[name="${CONFIG.EXPORT_MODE_NAME}"]:checked`)?.value || 'file';
-        const filenameInput = this.dropdown.querySelector(`#${CONFIG.FILENAME_INPUT_ID}`);
-        const customFilename = mode === 'file' ? filenameInput?.value?.trim() || '' : '';
-
-        await this.exportService.execute(mode, customFilename);
-
-        this.checkboxManager.removeAll();
-        this.selectionManager.resetDropdown();
-        if (filenameInput) filenameInput.value = '';
-
+        await this.exportService.execute(mode, customFilename, this.selectionManager);
       } catch (error) {
         console.error('Export error:', error);
-        alert(`Export failed: ${error.message}`);
+        alert(`导出失败：${error.message}`);
       } finally {
-        this.button.disabled = false;
-        this.button.textContent = 'Export Chat';
+        this.checkboxManager.removeAll();
+        this.selectionManager.reset();
+        if (filenameInput) filenameInput.value = '';
+
+        this.button.disabled    = false;
+        this.button.textContent = '导出对话';
       }
     }
 
-    observeVisibility() {
+    _observeVisibility() {
       const update = () => {
         try {
           if (chrome?.storage?.sync) {
-            chrome.storage.sync.get(['hideExportBtn'], (result) => {
+            chrome.storage.sync.get(['hideExportBtn'], result => {
               this.button.style.display = result.hideExportBtn ? 'none' : '';
             });
           }
@@ -574,9 +744,7 @@
 
       update();
 
-      const observer = new MutationObserver(update);
-      observer.observe(document.body, { childList: true, subtree: true });
-
+      // Listen only to storage events – no MutationObserver on the full DOM
       if (chrome?.storage?.onChanged) {
         chrome.storage.onChanged.addListener((changes, area) => {
           if (area === 'sync' && 'hideExportBtn' in changes) {
@@ -588,9 +756,19 @@
   }
 
   // ============================================================================
-  // INIT
+  // INITIALIZATION + SPA NAVIGATION DETECTION
   // ============================================================================
+
   const controller = new ExportController();
   controller.init();
+
+  // ChatGPT is a SPA: re-initialize if the button disappears after navigation
+  setInterval(() => {
+    if (!document.getElementById(CONFIG.BUTTON_ID) &&
+        document.querySelector(CONFIG.SELECTORS.CONVERSATION_TURN)) {
+      const freshController = new ExportController();
+      freshController.init();
+    }
+  }, 2000);
 
 })();
