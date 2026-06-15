@@ -61,6 +61,13 @@
       LIGHT_BORDER: '#ccc'
     },
 
+    POSITION: {
+      BUTTON_TOP: '64px',
+      BUTTON_RIGHT: '20px',
+      DROPDOWN_TOP: '108px',
+      DROPDOWN_RIGHT: '20px'
+    },
+
     FILENAME_PREFIX: 'ChatGPT'
   };
 
@@ -82,12 +89,6 @@
         .replace(/[\\/:*?"<>|.]/g, '')
         .replace(/\s+/g, '_')
         .replace(/^_+|_+$/g, '');
-    },
-
-    getDateString() {
-      const d = new Date();
-      const pad = n => n.toString().padStart(2, '0');
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
     },
 
     // Single updatable progress notification
@@ -291,8 +292,8 @@
 
       Object.assign(button.style, {
         position: 'fixed',
-        bottom: '100px',
-        right: '20px',
+        top: CONFIG.POSITION.BUTTON_TOP,
+        right: CONFIG.POSITION.BUTTON_RIGHT,
         zIndex: '9999',
         padding: '8px 18px',
         background: CONFIG.STYLES.BUTTON_PRIMARY,
@@ -318,8 +319,8 @@
 
       Object.assign(dropdown.style, {
         position: 'fixed',
-        bottom: '148px',
-        right: '20px',
+        top: CONFIG.POSITION.DROPDOWN_TOP,
+        right: CONFIG.POSITION.DROPDOWN_RIGHT,
         zIndex: '9999',
         border: `1px solid ${isDark ? CONFIG.STYLES.DARK_BORDER : CONFIG.STYLES.LIGHT_BORDER}`,
         borderRadius: '8px',
@@ -357,7 +358,7 @@
                  style="padding:4px 10px;width:100%;box-sizing:border-box;${inputStyles}"
                  placeholder="留空将使用对话标题">
           <div style="font-size:0.84em;color:#888;margin-top:3px;">
-            格式：ChatGPT_文件名_日期.md &nbsp;·&nbsp; 请勿含扩展名
+            格式：ChatGPT_标题.md &nbsp;·&nbsp; 请勿含扩展名
           </div>
         </div>
         <div style="margin-bottom:14px;">
@@ -492,21 +493,20 @@
     }
 
     generateFilename(custom, title) {
-      const prefix    = CONFIG.FILENAME_PREFIX;
-      const timestamp = Utils.getDateString();
+      const prefix = CONFIG.FILENAME_PREFIX;
 
       if (custom?.trim()) {
         let base = custom.trim().replace(/\.[^/.]+$/, '');
         base = base.replace(/[^a-zA-Z0-9_\-\u4e00-\u9fff\u3040-\u30ff]/g, '_');
-        return base ? `${prefix}_${base}_${timestamp}` : `${prefix}_${timestamp}`;
+        return base ? `${prefix}_${base}` : prefix;
       }
 
       if (title) {
         const safe = Utils.sanitizeFilename(title);
-        if (safe) return `${prefix}_${safe}_${timestamp}`;
+        if (safe) return `${prefix}_${safe}`;
       }
 
-      return `${prefix}_${timestamp}`;
+      return prefix;
     }
 
     async buildMarkdown(turns, title) {
