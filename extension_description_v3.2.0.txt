@@ -1,4 +1,4 @@
-Exports Gemini or ChatGPT chat conversations to Markdown files or clipboard.
+Exports Gemini or ChatGPT chat conversations to Markdown files, clipboard, or a Gemini batch folder.
 
 ┌──────────────────────────────────┐
   🚀 𝗔𝗜 𝗖𝗵𝗮𝘁 𝗘𝘅𝗽𝗼𝗿𝘁𝗲𝗿 🚀
@@ -10,8 +10,11 @@ Save and share your technical and scientific conversations from Gemini and ChatG
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-🎉 𝗡𝗘𝗪 𝗜𝗡 𝗩𝗘𝗥𝗦𝗜𝗢𝗡 𝟯.𝟮.𝟭 🎉
+🎉 𝗡𝗘𝗪 𝗜𝗡 𝗩𝗘𝗥𝗦𝗜𝗢𝗡 𝟰.𝟰.𝟬 🎉
 
+✅ 𝗖𝗹𝗲𝗮𝗿𝗲𝗿 𝗘𝘅𝗽𝗼𝗿𝘁 𝗖𝗵𝗼𝗶𝗰𝗲𝘀: Export the current chat directly, or use one unified Gemini choose/batch flow for sidebar history.
+✅ 𝗡𝗼 𝗗𝘂𝗽𝗹𝗶𝗰𝗮𝘁𝗲 𝗦𝗶𝗱𝗲𝗯𝗮𝗿 𝗦𝗰𝗮𝗻𝘀: Gemini batch export now scans once, opens a picker, and defaults to all conversations for full-history export.
+✅ 𝗦𝗲𝗮𝗿𝗰𝗵𝗮𝗯𝗹𝗲 𝗕𝗮𝘁𝗰𝗵 𝗣𝗶𝗰𝗸𝗲𝗿: Clear all, search, check rows, Shift-select ranges, or type sequence ranges like 1-5,8,12-20.
 ✅ 𝗚𝗿𝗮𝗻𝘂𝗹𝗮𝗿 𝗠𝗲𝘀𝘀𝗮𝗴𝗲 𝗦𝗲𝗹𝗲𝗰𝘁𝗶𝗼𝗻: Select exactly which messages to export using checkboxes next to each message.
 ✅ 𝗦𝗲𝗹𝗲𝗰𝘁𝗶𝗼𝗻 𝗣𝗿𝗲𝘀𝗲𝘁𝘀: Instantly select all, none, or only AI responses with a dropdown or quick toggles.
 ✅ 𝗘𝘅𝗽𝗼𝗿𝘁 𝘁𝗼 𝗖𝗹𝗶𝗽𝗯𝗼𝗮𝗿𝗱: Copy your chat as Markdown directly to your clipboard—no file download needed!
@@ -25,11 +28,16 @@ Save and share your technical and scientific conversations from Gemini and ChatG
 
 ⚙️ 𝗛𝗢𝗪 𝗧𝗢 𝗨𝗦𝗘
 
-➡️ 𝗘𝘅𝗽𝗼𝗿𝘁𝗶𝗻𝗴 𝗮 𝗙𝘂𝗹𝗹 𝗼𝗿 𝗣𝗮𝗿𝘁𝗶𝗮𝗹 𝗖𝗵𝗮𝘁
+➡️ 𝗘𝘅𝗽𝗼𝗿𝘁𝗶𝗻𝗴 𝘁𝗵𝗲 𝗖𝘂𝗿𝗿𝗲𝗻𝘁 𝗖𝗵𝗮𝘁
 ✅ Go to Gemini (gemini.google.com) or ChatGPT (chatgpt.com) and open any chat.
 ✅ Click the 𝗘𝘅𝗽𝗼𝗿𝘁 𝗖𝗵𝗮𝘁 button at the top right of the page.
 ✅ Use the checkboxes or dropdown to select which messages to export.
-✅ Choose to export as a Markdown file (with a custom filename, or leave blank for chat title/timestamp) or copy to clipboard.
+✅ Click Export Current Chat to save a Markdown file or copy to clipboard.
+
+➡️ 𝗚𝗲𝗺𝗶𝗻𝗶 𝗖𝗵𝗼𝗼𝘀𝗲 / 𝗕𝗮𝘁𝗰𝗵 𝗘𝘅𝗽𝗼𝗿𝘁
+✅ Open Gemini with the left sidebar visible.
+✅ Click Choose / Batch Export to scan the sidebar once.
+✅ The picker defaults to all conversations; export immediately for full batch export, or clear all and check rows for a subset.
 
 ➡️ 𝗛𝗶𝗱𝗶𝗻𝗴 𝘁𝗵𝗲 𝗘𝘅𝗽𝗼𝗿𝘁 𝗕𝘂𝘁𝘁𝗼𝗻
 ✅ Click the extension icon in your Chrome toolbar.
@@ -39,7 +47,7 @@ Save and share your technical and scientific conversations from Gemini and ChatG
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 📋 𝗣𝗘𝗥𝗠𝗜𝗦𝗦𝗜𝗢𝗡𝗦
-✅ This extension requires clipboard access. It uses the platform's built-in "copy" function to ensure your chat content, including complex 𝗟𝗮𝗧𝗲𝗫 formulas, is exported with perfect formatting.
+✅ This extension uses storage for settings, clipboard access for ChatGPT clipboard exports, and downloads access for Gemini batch folders.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

@@ -1,7 +1,7 @@
 /**
  * Gemini Chat Exporter - Gemini content script
  * Exports Gemini chat conversations to Markdown with LaTeX preservation
- * Version 4.3.0 - DOM-based extraction, selective foldered Gemini batch export
+ * Version 4.4.0 - Unified single-chat and choose/batch export flows
  */
 
 (function() {
@@ -17,7 +17,6 @@
     CHECKBOX_CLASS: 'gemini-export-checkbox',
     EXPORT_MODE_NAME: 'gemini-export-mode',
     CONFIRM_BTN_ID: 'gemini-export-confirm',
-    BATCH_CONFIRM_BTN_ID: 'gemini-export-batch-confirm',
     BATCH_SELECT_BTN_ID: 'gemini-export-batch-select',
     CANCEL_BTN_ID: 'gemini-export-cancel',
 
@@ -31,8 +30,18 @@
       CONVERSATION_TITLE: '[data-test-id="conversation-title"]',
       SIDEBAR_SCROLL_CONTAINER: '[data-test-id="overflow-container"]',
       SIDEBAR_INFINITE_SCROLLER: 'infinite-scroller',
-      SIDEBAR_CONVERSATION_LINK: 'a[data-test-id="conversation"][href^="/app/"]',
-      SIDEBAR_CONVERSATION_TITLE: '.conversation-title',
+      SIDEBAR_CONVERSATION_ITEM: '[data-test-id="conversation"]',
+      SIDEBAR_CONVERSATION_LINK: 'a[href^="/app/"]',
+      SIDEBAR_CONVERSATION_TITLE: '.conversation-title, .title-text',
+      SIDEBAR_OPEN_BUTTON: [
+        'button[data-test-id="side-nav-menu-button"]',
+        'button[data-test-id="side-nav-toggle-button"]',
+        'button[aria-label="打开边栏"]',
+        'button[aria-label="打开侧边栏"]',
+        'button[aria-label="Open sidebar"]',
+        'button[aria-label="Open side navigation"]',
+        'button[aria-label="Open navigation menu"]'
+      ].join(', '),
       SIDEBAR_LOADING_SPINNER: '[data-test-id="loading-history-spinner"]'
     },
 
@@ -45,6 +54,7 @@
       MAX_SCROLL_ATTEMPTS: 60,
       MAX_STABLE_SCROLLS: 4,
       MAX_SIDEBAR_SCROLL_ATTEMPTS: 80,
+      SIDEBAR_OPEN_TIMEOUT: 6000,
       NAVIGATION_TIMEOUT: 30000
     },
 
@@ -327,7 +337,7 @@
     constructor(conversations, resolve) {
       this.conversations = conversations;
       this.resolve = resolve;
-      this.selectedPaths = new Set();
+      this.selectedPaths = new Set(conversations.map(entry => entry.path));
       this.lastClickedIndex = null;
       this.searchText = '';
       this.el = null;
@@ -374,21 +384,21 @@
       const inputStyle = UIBuilder.getInputStyles(isDark);
       panel.innerHTML = `
         <div style="padding:14px 16px;border-bottom:1px solid ${isDark ? '#333' : '#eee'};">
-          <div style="font-weight:bold;font-size:1.05em;margin-bottom:8px;">选择要导出的 Gemini 对话</div>
+          <div style="font-weight:bold;font-size:1.05em;margin-bottom:8px;">选择对话 / 批量导出</div>
           <div style="display:grid;grid-template-columns:1fr 210px;gap:8px;margin-bottom:8px;">
             <input data-role="search" type="text" placeholder="搜索标题或对话 ID" style="padding:6px 10px;box-sizing:border-box;${inputStyle}">
             <input data-role="range" type="text" placeholder="序号范围，如 1-5,8" style="padding:6px 10px;box-sizing:border-box;${inputStyle}">
           </div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-            <button data-action="all">全选</button>
-            <button data-action="none">清空</button>
-            <button data-action="invert">反选</button>
+            <button data-action="all">全选全部</button>
+            <button data-action="none">清空全部</button>
+            <button data-action="invert">反选可见</button>
             <button data-action="replace-range">替换为范围</button>
             <button data-action="append-range">追加范围</button>
             <span data-role="count" style="margin-left:auto;color:${isDark ? '#ccc' : '#666'};"></span>
           </div>
           <div style="font-size:0.82em;color:${isDark ? '#aaa' : '#777'};margin-top:6px;">
-            范围输入只在点击“替换为范围”或“追加范围”时生效；最终以列表勾选为准。支持 Shift 连续选择。
+            默认全选；清空后勾选即可只导出部分对话。支持 Shift 连续选择与范围输入。
           </div>
         </div>
         <div data-role="list" style="flex:1;overflow:auto;padding:8px 0;"></div>
@@ -421,12 +431,12 @@
       });
 
       panel.querySelector('[data-action="all"]').addEventListener('click', () => {
-        this._visibleConversations().forEach(({ entry }) => this.selectedPaths.add(entry.path));
+        this.conversations.forEach(entry => this.selectedPaths.add(entry.path));
         this.renderList();
         this.updateCount();
       });
       panel.querySelector('[data-action="none"]').addEventListener('click', () => {
-        this._visibleConversations().forEach(({ entry }) => this.selectedPaths.delete(entry.path));
+        this.selectedPaths.clear();
         this.renderList();
         this.updateCount();
       });
@@ -757,7 +767,7 @@
 
     static getConversationLinks() {
       const links = new Map();
-      const anchors = document.querySelectorAll(CONFIG.SELECTORS.SIDEBAR_CONVERSATION_LINK);
+      const anchors = this._getConversationAnchors();
 
       anchors.forEach(anchor => {
         const path = StringUtils.normalizeGeminiPath(anchor.getAttribute('href') || '');
@@ -775,16 +785,77 @@
       return Array.from(links.values());
     }
 
+    static _getConversationAnchors() {
+      return Array.from(document.querySelectorAll(CONFIG.SELECTORS.SIDEBAR_CONVERSATION_ITEM))
+        .map(item => item.matches(CONFIG.SELECTORS.SIDEBAR_CONVERSATION_LINK)
+          ? item
+          : item.querySelector(CONFIG.SELECTORS.SIDEBAR_CONVERSATION_LINK))
+        .filter(Boolean);
+    }
+
+    static _hasVisibleConversationAnchors() {
+      return this._getConversationAnchors().some(anchor => DOMUtils.isVisible(anchor));
+    }
+
+    static _findSidebarOpenButton() {
+      const explicitButton = Array.from(
+        document.querySelectorAll(CONFIG.SELECTORS.SIDEBAR_OPEN_BUTTON)
+      ).find(button => DOMUtils.isVisible(button));
+      if (explicitButton) return explicitButton;
+
+      return Array.from(document.querySelectorAll('button[aria-label]')).find(button => {
+        if (!DOMUtils.isVisible(button)) return false;
+
+        const label = (button.getAttribute('aria-label') || '').trim();
+        return /打开.*(?:侧边栏|边栏|导航)/.test(label) ||
+          /\bopen\b.*\b(?:sidebar|side navigation|navigation menu)\b/i.test(label);
+      }) || null;
+    }
+
+    static async ensureSidebarOpen() {
+      if (this._hasVisibleConversationAnchors()) return true;
+
+      const startedAt = Date.now();
+      let clickedOpenButton = false;
+
+      while (Date.now() - startedAt < CONFIG.TIMING.SIDEBAR_OPEN_TIMEOUT) {
+        if (this._hasVisibleConversationAnchors()) {
+          await DOMUtils.sleep(CONFIG.TIMING.NAVIGATION_SETTLE_DELAY);
+          return true;
+        }
+
+        if (!clickedOpenButton) {
+          const openButton = this._findSidebarOpenButton();
+          if (openButton) {
+            DOMUtils.showProgress('正在重新展开 Gemini 侧边栏…');
+            openButton.click();
+            clickedOpenButton = true;
+          }
+        }
+
+        await DOMUtils.sleep(200);
+      }
+
+      return this._hasVisibleConversationAnchors();
+    }
+
     static _extractTitle(anchor) {
       const titleEl = anchor.querySelector(CONFIG.SELECTORS.SIDEBAR_CONVERSATION_TITLE);
-      if (!titleEl) return StringUtils.normalizeWhitespace(anchor.textContent);
+      if (titleEl) {
+        const clone = titleEl.cloneNode(true);
+        clone.querySelectorAll('.conversation-title-cover').forEach(el => el.remove());
+        const title = StringUtils.normalizeWhitespace(clone.textContent);
+        if (title) return title;
+      }
 
-      const clone = titleEl.cloneNode(true);
-      clone.querySelectorAll('.conversation-title-cover').forEach(el => el.remove());
-      return StringUtils.normalizeWhitespace(clone.textContent);
+      return StringUtils.normalizeWhitespace(
+        anchor.getAttribute('aria-label') || anchor.textContent
+      );
     }
 
     static async loadAllConversationLinks({ onProgress, shouldStop } = {}) {
+      await this.ensureSidebarOpen();
+
       const scrollContainer = this.getScrollContainer();
       if (!scrollContainer) {
         throw new Error('未找到 Gemini 侧边栏历史记录容器。请展开左侧边栏后重试。');
@@ -852,6 +923,10 @@
       let anchor = this.findAnchorByPath(path);
       if (anchor) return anchor;
 
+      await this.ensureSidebarOpen();
+      anchor = this.findAnchorByPath(path);
+      if (anchor) return anchor;
+
       const scrollContainer = this.getScrollContainer();
       if (!scrollContainer) return null;
 
@@ -887,8 +962,9 @@
       const id = StringUtils.getGeminiConversationId(path);
       if (!id) return null;
 
-      return Array.from(document.querySelectorAll(CONFIG.SELECTORS.SIDEBAR_CONVERSATION_LINK))
-        .find(anchor => StringUtils.getGeminiConversationId(anchor.getAttribute('href') || '') === id) || null;
+      return this._getConversationAnchors()
+        .find(anchor => DOMUtils.isVisible(anchor) &&
+          StringUtils.getGeminiConversationId(anchor.getAttribute('href') || '') === id) || null;
     }
 
     static async openConversation(entry) {
@@ -1344,13 +1420,13 @@
         </div>
         <div id="gemini-filename-row" style="margin-bottom:10px;">
           <div style="font-weight:bold;margin-bottom:4px;">
-            文件名 <span style="color:#888;font-weight:normal;">（可选）</span>
+            文件名 / 文件夹名 <span style="color:#888;font-weight:normal;">（可选）</span>
           </div>
           <input id="${CONFIG.FILENAME_INPUT_ID}" type="text"
                  style="padding:4px 10px;width:100%;box-sizing:border-box;${inputStyles}"
-                 placeholder="留空将使用对话标题">
+                 placeholder="留空将自动命名">
           <div style="font-size:0.84em;color:#888;margin-top:3px;">
-            格式：Gemini_标题.md &nbsp;·&nbsp; 请勿含扩展名
+            当前对话作为文件名；选择/批量导出作为文件夹名；请勿含扩展名
           </div>
         </div>
         <div style="margin-bottom:14px;">
@@ -1364,19 +1440,16 @@
           </select>
         </div>
         <div style="margin-bottom:12px;padding:10px 0;border-top:1px solid ${isDark ? '#333' : '#eee'};border-bottom:1px solid ${isDark ? '#333' : '#eee'};">
-          <button id="${CONFIG.BATCH_CONFIRM_BTN_ID}" style="width:100%;padding:7px 12px;background:transparent;color:${CONFIG.STYLES.BUTTON_PRIMARY};border:1px solid ${CONFIG.STYLES.BUTTON_PRIMARY};border-radius:5px;font-size:0.95em;font-weight:bold;cursor:pointer;">
-            批量导出侧栏对话
-          </button>
-          <button id="${CONFIG.BATCH_SELECT_BTN_ID}" style="width:100%;margin-top:8px;padding:7px 12px;background:transparent;color:${CONFIG.STYLES.BUTTON_PRIMARY};border:1px solid ${CONFIG.STYLES.BUTTON_PRIMARY};border-radius:5px;font-size:0.95em;font-weight:bold;cursor:pointer;">
-            选择对话导出
+          <button id="${CONFIG.BATCH_SELECT_BTN_ID}" style="width:100%;padding:7px 12px;background:transparent;color:${CONFIG.STYLES.BUTTON_PRIMARY};border:1px solid ${CONFIG.STYLES.BUTTON_PRIMARY};border-radius:5px;font-size:0.95em;font-weight:bold;cursor:pointer;">
+            选择对话 / 批量导出
           </button>
           <div style="font-size:0.82em;color:#888;margin-top:6px;line-height:1.35;">
-            将滚动左侧历史记录，并按对话分别保存到同一文件夹。
+            默认全选侧栏历史；清空后可搜索、勾选并导出到同一文件夹。
           </div>
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:8px;border-top:1px solid ${isDark ? '#333' : '#eee'};">
           <button id="${CONFIG.CANCEL_BTN_ID}" style="${cancelStyle}">取消</button>
-          <button id="${CONFIG.CONFIRM_BTN_ID}" style="${confirmStyle}">开始导出</button>
+          <button id="${CONFIG.CONFIRM_BTN_ID}" style="${confirmStyle}">导出当前对话</button>
         </div>
       `;
     }
@@ -1863,15 +1936,11 @@
       this.dropdown.querySelector(`#${CONFIG.SELECT_DROPDOWN_ID}`)
         .addEventListener('change', e => this._handleSelectionChange(e.target.value));
 
-      // "开始导出" confirm button
+      // "导出当前对话" confirm button
       this.dropdown.querySelector(`#${CONFIG.CONFIRM_BTN_ID}`)
         .addEventListener('click', () => this.startExport());
 
-      // Batch export button
-      this.dropdown.querySelector(`#${CONFIG.BATCH_CONFIRM_BTN_ID}`)
-        .addEventListener('click', () => this.startBatchExport());
-
-      // Selective batch export button
+      // Choose/batch export button
       this.dropdown.querySelector(`#${CONFIG.BATCH_SELECT_BTN_ID}`)
         .addEventListener('click', () => this.startSelectedBatchExport());
 
@@ -1946,31 +2015,6 @@
         this.selectionManager.reset();
 
         const filenameInput = this.dropdown.querySelector(`#${CONFIG.FILENAME_INPUT_ID}`);
-        if (filenameInput) filenameInput.value = '';
-
-        this.button.disabled = false;
-        this.button.textContent = '导出对话';
-      }
-    }
-
-    async startBatchExport() {
-      const filenameInput = this.dropdown.querySelector(`#${CONFIG.FILENAME_INPUT_ID}`);
-      const customFilename = filenameInput?.value.trim() || '';
-
-      this.dropdown.style.display = 'none';
-      this.button.disabled = true;
-      this.button.textContent = '批量导出中…';
-
-      try {
-        await this.batchExportService.execute(customFilename, this.selectionManager);
-      } catch (error) {
-        DOMUtils.hideProgress();
-        console.error('Batch export error:', error);
-        alert(`批量导出失败：${error.message}`);
-      } finally {
-        this.checkboxManager.removeAll();
-        this.selectionManager.reset();
-
         if (filenameInput) filenameInput.value = '';
 
         this.button.disabled = false;

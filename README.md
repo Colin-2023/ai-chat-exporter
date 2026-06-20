@@ -1,13 +1,13 @@
 # AI Chat Exporter
 
-Export your Gemini and ChatGPT conversations to perfectly formatted Markdown files with complete preservation of LaTeX math, code blocks, tables, and all formatting. Version 4.3.0 adds selective Gemini batch export with a searchable picker, checkboxes, Shift range selection, and explicit sequence-range input.
+Export your Gemini and ChatGPT conversations to perfectly formatted Markdown files with complete preservation of LaTeX math, code blocks, tables, and all formatting. Version 4.4.0 separates fast single-chat export from a unified Gemini choose/batch export flow.
 
 ## Features
 
 - **DOM-based extraction for Gemini (v4.0.0+)**: Direct HTML parsing without clipboard dependency using Turndown library
 - Export your full Gemini or ChatGPT chat conversation to Markdown, preserving formatting (code, tables, LaTeX, etc.)
-- **Gemini batch export (v4.2.2+)**: Scrolls the left sidebar history, opens each discovered conversation, and saves one Markdown file per conversation into a shared download folder
-- **Selective Gemini batch export (v4.3.0+)**: Choose specific conversations from a searchable picker using checkboxes, Shift-click ranges, or sequence ranges like `1-5,8,12-20`
+- **Single-chat export**: Export the currently open Gemini or ChatGPT conversation without scanning the history sidebar
+- **Unified Gemini choose/batch export (v4.4.0+)**: Scan the Gemini sidebar once, review a searchable picker that defaults to all conversations, then export all or only selected conversations
 - Dedicated **导出对话 (Export Chat)** button appears automatically on every Gemini and ChatGPT chat page (upper-right area)
 - Option to hide the export button via the extension popup
 - **Granular message selection**: Use checkboxes next to each message to select exactly what to export
@@ -36,9 +36,28 @@ Export your Gemini and ChatGPT conversations to perfectly formatted Markdown fil
 3. **You're done!**
    - The **导出对话 (Export Chat)** button will now appear on every Gemini and ChatGPT chat page
 
+## What's New in v4.4.0
+
+- **Cleaner export choices**: The Gemini menu now has two clear actions: **导出当前对话** for the open chat, and **选择对话 / 批量导出** for sidebar history export.
+- **No duplicate sidebar scans**: Removed the separate full-batch button. The choose/batch picker defaults to all conversations, so exporting everything and exporting a subset share one scan and one flow.
+- **Better picker defaults**: Conversations are selected by default after scanning; clear all, search, Shift-select, or use ranges only when you want a subset.
+
+## What's New in v4.3.2
+
+- **Canvas navigation recovery**: Detects when a Gemini Canvas conversation collapses the history sidebar and automatically opens it again before navigating to the next conversation.
+- **Localized sidebar controls**: Recognizes the current Chinese and English labels used by Gemini's sidebar toggle.
+- **Batch and picker resilience**: Applies the same sidebar recovery before scanning history and while locating each selected conversation.
+- **Scope**: This fixes batch navigation around Canvas conversations; extracting the separate Canvas editor content is still not supported.
+
+## What's New in v4.3.1
+
+- **Gemini May 20 UI compatibility**: Supports the sidebar structure where `data-test-id="conversation"` moved from the conversation link to its outer `gem-nav-list-item`.
+- **Backward-compatible history discovery**: Continues to support the May 1 link-based structure while resolving the nested `/app/<id>` link used by the new UI.
+- **Updated title extraction**: Reads both the old `.conversation-title` and new `.title-text` labels, with the link's `aria-label` as a fallback.
+
 ## What's New in v4.3.0
 
-- **Selective batch export**: Added `选择对话导出`, which scans Gemini history and opens a picker before exporting.
+- **Selective batch export**: Added a searchable picker for choosing specific Gemini conversations before exporting.
 - **Searchable selection picker**: Filter by title or conversation ID, then select visible rows with checkboxes.
 - **Range selection**: Supports Shift-click continuous selection and explicit ranges such as `1-5,8,12-20`.
 - **Conflict-free selection model**: Range input only changes the checkbox state when applying `替换为范围` or `追加范围`; the final export always uses the currently checked rows.
@@ -59,7 +78,7 @@ Export your Gemini and ChatGPT conversations to perfectly formatted Markdown fil
 
 ## What's New in v4.2.0
 
-- **Gemini batch export**: Added `批量导出侧栏对话` to export all conversations discovered from the Gemini left sidebar.
+- **Gemini batch export**: Added sidebar history export for all conversations discovered from the Gemini left sidebar.
 - **Sidebar conversation discovery**: Detects Gemini history entries via `a[data-test-id="conversation"][href^="/app/"]`, normalizes `/app/<id>` links, and removes tracking query parameters for de-duplication.
 - **Batch navigation workflow**: Opens each discovered conversation, waits for chat content to load, reuses the existing DOM-based Markdown extraction, and records failures.
 
@@ -101,7 +120,7 @@ Support for other LLMs like DeepSeek, Claude, and Grok will be added in future u
    - **Export as file** (default): Downloads a Markdown (.md) file
    - **Export to clipboard**: Copies the conversation to your clipboard for pasting elsewhere
 5. **(Optional)** Enter a custom filename, or leave blank to automatically use the conversation title.
-6. Click **开始导出 / 导出对话** to start. The button will show `导出中…` during the process.
+6. Click **导出当前对话** to start. The button will show `导出中…` during the process.
 7. The extension will:
    - Automatically scroll to load all messages in the conversation (including lazy-loaded older messages)
    - Extract content directly from the DOM (no clipboard needed!)
@@ -109,18 +128,14 @@ Support for other LLMs like DeepSeek, Claude, and Grok will be added in future u
    - Remove Gemini citation markers like `[cite_start]` and `[cite:1,2,3]`
 8. Your exported file will be named: `Gemini_<conversation_title>.md` (e.g., `Gemini_My_Conversation.md`)
 
-**Gemini batch export:**
+**Gemini choose/batch export:**
 1. Open Gemini with the left sidebar visible.
 2. Click **导出对话 (Export Chat)**.
 3. Choose the message preset. `全部` exports prompts and answers; `仅 AI 回复` exports only Gemini responses. `自定义` is treated as `全部` for batch mode.
 4. Optional: enter a folder name. If blank, the folder is named like `Gemini_All_Chats_YYYY-MM-DD_HHMMSS`.
-5. Click **批量导出侧栏对话**. The extension will scroll the left sidebar history, open each discovered `/app/<id>` conversation, load its messages, and download one `.md` file per conversation into that folder.
-
-**Selective Gemini batch export:**
-1. Click **选择对话导出** instead of the full batch button.
-2. After scanning, use the picker to search titles, tick individual rows, Shift-click to select a continuous block, or type a range like `1-5,8,12-20`.
-3. Range input does not automatically override manual checks. Use **替换为范围** to replace the current checked rows, or **追加范围** to add the range to the current checked rows.
-4. Click **导出选中** to export only the checked conversations into the batch folder.
+5. Click **选择对话 / 批量导出**. The extension scans the sidebar once and opens a picker with all discovered conversations selected by default.
+6. To export everything, click **导出选中** immediately. To export a subset, click **清空全部**, then search titles, tick rows, Shift-click to select a continuous block, or type a range like `1-5,8,12-20`.
+7. Range input does not automatically override manual checks. Use **替换为范围** to replace the current checked rows, or **追加范围** to add the range to the current checked rows.
 
 **Batch export notes:**
 - Batch export uses Chrome's downloads API and requires the `downloads` permission.
@@ -128,7 +143,7 @@ Support for other LLMs like DeepSeek, Claude, and Grok will be added in future u
 - Failed conversations are listed in `_failed.md` in the same folder.
 - `_manifest_start.md` is written first to create and identify the batch folder. `_manifest_done.md` means the batch completed; `_manifest_cancelled.md` means it was stopped before completion.
 - Use the progress panel's **暂停 / 继续** and **中止** controls while a batch is running. Pause takes effect between conversations; cancel stops after the current step finishes.
-- It depends on Gemini's visible sidebar history. If older conversations are not loaded by sidebar scrolling, they will not be included.
+- It depends on Gemini's visible sidebar history. The exporter supports the May 1 and May 20, 2026 sidebar DOM variants; if older conversations are not loaded by sidebar scrolling, they will not be included.
 - The current page may move through multiple conversations during the export; the extension attempts to return to the starting conversation afterward.
 
 **Supported formatting:**
@@ -157,7 +172,7 @@ Support for other LLMs like DeepSeek, Claude, and Grok will be added in future u
 5. Choose your export mode:
    - **Export as file** (default): Downloads a Markdown (.md) file
    - **Export to clipboard**: Copies the conversation to your clipboard
-6. Click **开始导出 / 导出对话** to start. The button will show `导出中…` during the process.
+6. Click **导出当前对话** to start. The button will show `导出中…` during the process.
 7. The extension will:
    - Automatically scroll to load all messages in the conversation
    - Use ChatGPT's built-in copy button to extract formatted content

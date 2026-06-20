@@ -2,7 +2,7 @@
 /**
  * ChatGPT Chat Exporter - Content script
  * Exports ChatGPT conversations to Markdown with message selection.
- * Version 4.1.0 - Localized UI, improved reliability
+ * Version 4.4.0 - Unified single-chat export wording
  */
 
 (function() {
@@ -372,7 +372,7 @@
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:8px;border-top:1px solid ${isDark ? '#333' : '#eee'};">
           <button id="${CONFIG.CANCEL_BTN_ID}" style="${cancelStyle}">取消</button>
-          <button id="${CONFIG.CONFIRM_BTN_ID}" style="${confirmStyle}">开始导出</button>
+          <button id="${CONFIG.CONFIRM_BTN_ID}" style="${confirmStyle}">导出当前对话</button>
         </div>
       `;
 
@@ -652,7 +652,7 @@
           this.selectionManager.apply(value);
         });
 
-      // "开始导出" confirm button
+      // "导出当前对话" confirm button
       this.dropdown.querySelector(`#${CONFIG.CONFIRM_BTN_ID}`)
         .addEventListener('click', () => this.startExport());
 
